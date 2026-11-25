@@ -27,15 +27,11 @@ class Exporter(private val context: Context) {
 
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
             val base = "IPTV_${stamp}"
-            val fileName = when (format) {
-                ExportFormat.TVBOX -> "${base}_tvbox.json"
-                else -> "$base.${format.ext}"
-            }
+            val fileName = "$base.${format.ext}"
             val content = when (format) {
                 ExportFormat.M3U, ExportFormat.M3U8 -> buildM3u(channels, format == ExportFormat.M3U8)
                 ExportFormat.TXT -> buildTxt(channels)
                 ExportFormat.JSON -> buildJson(channels)
-                ExportFormat.TVBOX -> buildTvBox(channels)
                 ExportFormat.XSPF -> buildXspf(channels)
                 ExportFormat.CSV -> buildCsv(channels)
             }
@@ -87,34 +83,6 @@ class Exporter(private val context: Context) {
             )
         }
         return Gson().toJson(mapOf("generated_at" to System.currentTimeMillis(), "count" to data.size, "channels" to data))
-    }
-
-    /** 生成 TVBox 可用的订阅配置：把有效频道直接写入 lives，导入后即可播放 */
-    fun buildTvBox(channels: List<Channel>): String {
-        // 调用方已过滤 FAIL，这里再兜底一次，确保只导出有效源
-        val valid = channels.filter { it.status != Channel.STATUS_FAIL }
-        val lives = valid.take(2000).map { ch ->
-            mapOf(
-                "name" to ch.name,
-                "url" to ch.url,
-                "group" to ch.group.ifBlank { "IPTV" },
-                "type" to 0
-            )
-        }
-        val urls = valid.map { it.source }
-            .filter { it.contains("://") }
-            .distinct()
-            .take(30)
-            .mapIndexed { i, u ->
-                mapOf("name" to "IPTV线路${i + 1}", "url" to u, "type" to 0, "searchable" to 0)
-            }
-        return Gson().toJson(
-            mapOf(
-                "name" to "IPTV 聚合（有效源）",
-                "sites" to urls,
-                "lives" to lives
-            )
-        )
     }
 
     fun buildXspf(channels: List<Channel>): String = buildString {

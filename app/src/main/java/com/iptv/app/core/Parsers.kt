@@ -4,7 +4,6 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.iptv.app.data.SourceCatalog
 import com.iptv.app.model.Channel
-import com.iptv.app.model.TvBoxSite
 
 object Parsers {
 
@@ -144,88 +143,6 @@ object Parsers {
 
     private fun com.google.gson.JsonObject.str(key: String): String? =
         if (has(key) && !get(key).isJsonNull) get(key).asString else null
-
-    /** 解析 TVBox 订阅配置，提取站点 */
-    fun parseTvBoxSites(text: String): List<TvBoxSite> {
-        val out = mutableListOf<TvBoxSite>()
-        try {
-            val root = JsonParser.parseString(text)
-            if (!root.isJsonObject) return out
-            val sites = listOf("sites", "site", "urls")
-                .firstOrNull { root.asJsonObject.has(it) && root.asJsonObject.get(it).isJsonArray }
-                ?.let { root.asJsonObject.getAsJsonArray(it) } ?: return out
-            sites.forEach { el ->
-                if (!el.isJsonObject) return@forEach
-                val o = el.asJsonObject
-                val name = o.str("name") ?: return@forEach
-                val url = o.str("url") ?: ""
-                out += TvBoxSite(
-                    name = name,
-                    url = url,
-                    type = o.int("type"),
-                    api = o.str("api") ?: "",
-                    searchable = o.int("searchable"),
-                    categories = o.str("categories")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
-                )
-            }
-        } catch (_: Exception) { }
-        return out
-    }
-
-    /** 从 TVBox 配置中找出可直接当成播放列表的地址 */
-    fun tvBoxDirectUrls(text: String): List<Pair<String, String>> {
-        val out = mutableListOf<Pair<String, String>>()
-        parseTvBoxSites(text).forEach { site ->
-            val u = site.url.trim()
-            if (u.contains("://") && (u.contains(".m3u", true) || u.contains(".txt", true) || u.contains("iptv", true))) {
-                out += site.name to u
-            }
-        }
-        return out
-    }
-
-    /**
-     * 解析 TVBox 配置中的 lives 字段，得到可直接播放的频道。
-     * 兼容 url 为单个字符串或字符串数组（多线路）两种写法。
-     */
-    fun parseTvBoxLives(text: String, source: String): List<Channel> {
-        val out = mutableListOf<Channel>()
-        try {
-            val root = JsonParser.parseString(text)
-            if (!root.isJsonObject) return out
-            val obj = root.asJsonObject
-            val lives = (listOf("lives", "live").firstOrNull { obj.has(it) && obj.get(it).isJsonArray })
-                ?.let { obj.getAsJsonArray(it) } ?: return out
-            lives.forEach { el ->
-                if (!el.isJsonObject) return@forEach
-                val o = el.asJsonObject
-                val name = o.str("name") ?: o.str("title") ?: return@forEach
-                val group = o.str("group") ?: o.str("group_name") ?: "TVBox"
-                val urlEl = o.get("url") ?: o.get("play_url") ?: return@forEach
-                val urls = when {
-                    urlEl.isJsonPrimitive -> listOf(urlEl.asString)
-                    urlEl.isJsonArray -> urlEl.asJsonArray.mapNotNull {
-                        if (it.isJsonPrimitive) it.asString else null
-                    }
-                    else -> emptyList()
-                }
-                urls.map { it.trim() }.filter { it.contains("://") }.forEach { u ->
-                    out += Channel(
-                        name = name,
-                        url = u,
-                        group = SourceCatalog.categoryOf(name, group),
-                        logo = o.str("logo") ?: "",
-                        source = source,
-                        rawLine = "TVBoxLive"
-                    )
-                }
-            }
-        } catch (_: Exception) { }
-        return out
-    }
-
-    private fun com.google.gson.JsonObject.int(key: String): Int =
-        try { if (has(key) && !get(key).isJsonNull) get(key).asInt else 0 } catch (_: Exception) { 0 }
 
     /** 合并、归一化、去重：相同频道保留多条线路，按名称分组 */
     fun mergeAndNormalize(channels: List<Channel>, retainDuplicate: Boolean): List<Channel> {

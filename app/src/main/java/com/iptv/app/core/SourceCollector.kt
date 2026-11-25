@@ -121,33 +121,13 @@ class SourceCollector(private val context: Context) {
 
             return when (src.type) {
                 SourceConfig.TYPE_TXT -> Parsers.parseTxt(body, src.name)
-                SourceConfig.TYPE_TVBOX -> {
-                    val direct = Parsers.tvBoxDirectUrls(body)
-                    direct.mapIndexed { i, (name, u) ->
-                        Channel(name, u, group = "TVBox", source = src.name, rawLine = "TVBox#$i")
-                    }
-                }
-                SourceConfig.TYPE_JSON -> Parsers.parseAny(body, src.name)
                 else -> Parsers.parseAny(body, src.name)
             }
         }
     }
 
     /** 导入用户提供的文本（本地文件或粘贴内容） */
-    fun parseImported(text: String, label: String): List<Channel> {
-        val head = text.trimStart().take(200)
-        return when {
-            head.startsWith("{") && (text.contains("\"sites\"") || text.contains("\"lives\"")) -> {
-                // lives = 可直接播放的频道；sites 中的 m3u/txt 地址作为线路补充
-                val lives = Parsers.parseTvBoxLives(text, label)
-                val direct = Parsers.tvBoxDirectUrls(text).mapIndexed { i, (name, url) ->
-                    Channel(name, url, group = "TVBox", source = label, rawLine = "TVBox#$i")
-                }
-                (lives + direct).distinctBy { it.url }
-            }
-            else -> Parsers.parseAny(text, label)
-        }
-    }
+    fun parseImported(text: String, label: String): List<Channel> = Parsers.parseAny(text, label)
 
     companion object {
         const val DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 IPTV/1.1"

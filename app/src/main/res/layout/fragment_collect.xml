@@ -236,10 +236,6 @@
                             android:layout_width="0dp" android:layout_columnWeight="1"
                             android:layout_margin="3dp" android:text="JSON" />
                         <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnTvbox" style="@style/BtnOutline"
-                            android:layout_width="0dp" android:layout_columnWeight="1"
-                            android:layout_margin="3dp" android:text="TVBox" />
-                        <com.google.android.material.button.MaterialButton
                             android:id="@+id/btnXspf" style="@style/BtnOutline"
                             android:layout_width="0dp" android:layout_columnWeight="1"
                             android:layout_margin="3dp" android:text="XSPF" />

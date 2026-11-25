@@ -37,7 +37,6 @@ data class SourceConfig(
     companion object {
         const val TYPE_M3U = "m3u"
         const val TYPE_TXT = "txt"
-        const val TYPE_TVBOX = "tvbox"
         const val TYPE_JSON = "json"
     }
 }
@@ -56,17 +55,6 @@ enum class ExportFormat(val ext: String, val label: String, val mime: String) {
     M3U8("m3u8", "M3U8 播放列表", "application/vnd.apple.mpegurl"),
     TXT("txt", "TXT 通用格式", "text/plain"),
     JSON("json", "JSON 数据", "application/json"),
-    TVBOX("json", "TVBox 配置", "application/json"),
     XSPF("xspf", "XSPF 播放列表", "application/xspf+xml"),
     CSV("csv", "CSV 表格", "text/csv")
 }
-
-/** TVBox 站点配置 */
-data class TvBoxSite(
-    val name: String,
-    val url: String,
-    val type: Int = 0,
-    val api: String = "",
-    val searchable: Int = 0,
-    val categories: List<String> = emptyList()
-)
