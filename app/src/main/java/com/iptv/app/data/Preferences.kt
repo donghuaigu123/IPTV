@@ -19,15 +19,28 @@ object Prefs {
     } catch (_: Exception) { def }
 
     // ---------------- 源配置 ----------------
-    fun getSources(c: Context): MutableList<SourceConfig> =
-        ctx(c).getJson("sources", SourceCatalog.builtInSources.toMutableList()).toMutableList()
+    fun getSources(c: Context): MutableList<SourceConfig> {
+        val savedVersion = ctx(c).getInt("catalog_version", 0)
+        if (savedVersion < SourceCatalog.CATALOG_VERSION) {
+            // 内置源清单升级：重建内置源，但保留用户自定义源
+            val cached = ctx(c).getJson("sources", mutableListOf<SourceConfig>())
+            val custom = cached.filter { !it.builtIn }
+            val merged = (SourceCatalog.builtInSources + custom).toMutableList()
+            ctx(c).edit()
+                .putString("sources", gson.toJson(merged))
+                .putInt("catalog_version", SourceCatalog.CATALOG_VERSION)
+                .apply()
+            return merged
+        }
+        return ctx(c).getJson("sources", SourceCatalog.builtInSources.toMutableList()).toMutableList()
+    }
 
     fun saveSources(c: Context, list: List<SourceConfig>) {
         ctx(c).edit().putString("sources", gson.toJson(list)).apply()
     }
 
     fun resetSources(c: Context) {
-        ctx(c).edit().remove("sources").apply()
+        ctx(c).edit().remove("sources").putInt("catalog_version", 0).apply()
     }
 
     // ---------------- 频道缓存 ----------------

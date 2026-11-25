@@ -2,6 +2,7 @@ package com.iptv.app.core
 
 import android.content.Context
 import com.iptv.app.data.Prefs
+import com.iptv.app.data.SourceCatalog
 import com.iptv.app.model.Channel
 import com.iptv.app.model.CollectProgress
 import com.iptv.app.model.SourceConfig
@@ -15,15 +16,27 @@ import java.util.concurrent.TimeUnit
 
 class SourceCollector(private val context: Context) {
 
+    /** 单源采集结果，用于诊断反馈 */
+    data class SourceResult(
+        val name: String,
+        val count: Int,
+        val success: Boolean,
+        val detail: String,
+        val usedMirror: String
+    )
+
+    private var lastResults = mutableListOf<SourceResult>()
+    fun getLastResults(): List<SourceResult> = lastResults.toList()
+
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(18, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     /**
-     * 并发抓取所有启用的订阅源并解析为频道。
+     * 并发抓取所有启用的订阅源，GitHub Raw 源自动尝试镜像回退。
      */
     suspend fun collect(
         sources: List<SourceConfig>,
@@ -32,24 +45,30 @@ class SourceCollector(private val context: Context) {
         val enabled = sources.filter { it.enabled }
         val total = enabled.size
         var done = 0
+        lastResults.clear()
         onProgress(CollectProgress("正在连接数据源", 0, total, "共 $total 个订阅源"))
 
         val lists = enabled.map { src ->
             async {
-                val chans = try {
-                    fetchOne(src)
-                } catch (e: Exception) {
-                    onProgress(CollectProgress("抓取失败", done + 1, total, "${src.name}: ${e.message}"))
-                    emptyList()
-                }
+                val result = fetchWithFallback(src)
+                val info = result.result
+                synchronized(lastResults) { lastResults.add(info) }
                 done++
-                onProgress(CollectProgress("正在抓取订阅源", done, total, src.name))
-                chans
+                val short = if (info.success) "+${info.count}" else "失败"
+                onProgress(
+                    CollectProgress(
+                        "正在抓取订阅源", done, total,
+                        "${src.name} $short${if (info.usedMirror.isNotBlank()) " · ${info.usedMirror}" else ""}"
+                    )
+                )
+                result.channels
             }
         }.awaitAll()
 
         val all = lists.flatten()
-        onProgress(CollectProgress("正在整理频道", total, total, "原始条目 ${all.size} 条"))
+        val okSources = lastResults.count { it.success }
+        onProgress(CollectProgress("正在整理频道", total, total, "成功源 $okSources/$total · 原始条目 ${all.size} 条"))
+
         val merged = Parsers.mergeAndNormalize(
             all,
             Prefs.getBool(context, Prefs.KEY_RETAIN_DUP, true)
@@ -58,7 +77,34 @@ class SourceCollector(private val context: Context) {
         merged
     }
 
-    /** 抓取并解析单个源 */
+    /** 带镜像回退的单源抓取：依次尝试原始地址与各加速镜像 */
+    private fun fetchWithFallback(src: SourceConfig): SourceResultWithChannels {
+        val candidates = SourceCatalog.candidateUrls(src.url.trim())
+        var lastError = ""
+        candidates.forEachIndexed { index, url ->
+            val label = if (index == 0) "直连" else "镜像$index"
+            try {
+                val channels = fetchOne(src.copy(url = url))
+                if (channels.isNotEmpty()) {
+                    return SourceResultWithChannels(
+                        SourceResult(src.name, channels.size, true, "OK", label),
+                        channels
+                    )
+                }
+                lastError = "空内容"
+            } catch (e: Exception) {
+                lastError = e.message?.take(40) ?: "连接失败"
+            }
+        }
+        return SourceResultWithChannels(
+            SourceResult(src.name, 0, false, lastError, ""),
+            emptyList()
+        )
+    }
+
+    private data class SourceResultWithChannels(val result: SourceResult, val channels: List<Channel>)
+
+    /** 抓取并解析单个源（具体 URL） */
     private fun fetchOne(src: SourceConfig): List<Channel> {
         val url = src.url.trim()
         if (url.isBlank()) return emptyList()
@@ -71,7 +117,7 @@ class SourceCollector(private val context: Context) {
         client.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
             val body = resp.body?.string() ?: return emptyList()
-            if (body.isBlank()) return emptyList()
+            if (body.isBlank() || body.length < 50) return emptyList()
 
             return when (src.type) {
                 SourceConfig.TYPE_TXT -> Parsers.parseTxt(body, src.name)
@@ -101,6 +147,6 @@ class SourceCollector(private val context: Context) {
     }
 
     companion object {
-        const val DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36 IPTV/1.0"
+        const val DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 IPTV/1.1"
     }
 }

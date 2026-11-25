@@ -2,40 +2,50 @@ package com.iptv.app.ui
 
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
-import com.google.android.material.tabs.TabLayout
+import androidx.fragment.app.Fragment
+import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.iptv.app.R
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var tabs: TabLayout
+    private lateinit var bottomNav: BottomNavigationView
+    private val fragments = mutableMapOf<Int, Fragment>()
     private var currentTab = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        tabs = findViewById(R.id.tabs)
+        bottomNav = findViewById(R.id.bottomNav)
 
-        listOf(getString(R.string.tab_collect), getString(R.string.tab_library), getString(R.string.tab_settings))
-            .forEach { tabs.addTab(tabs.newTab().setText(it)) }
-
-        tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: TabLayout.Tab?) { tab?.let { switchTo(it.position) } }
-            override fun onTabUnselected(tab: TabLayout.Tab?) {}
-            override fun onTabReselected(tab: TabLayout.Tab?) {}
-        })
+        bottomNav.setOnItemSelectedListener { item ->
+            when (item.itemId) {
+                R.id.nav_collect -> { switchTo(0); true }
+                R.id.nav_library -> { switchTo(1); true }
+                R.id.nav_settings -> { switchTo(2); true }
+                else -> false
+            }
+        }
         switchTo(0)
     }
 
     private fun switchTo(pos: Int) {
         if (pos == currentTab) return
         currentTab = pos
-        val frag = when (pos) {
-            0 -> CollectorFragment()
-            1 -> LibraryFragment()
-            else -> SettingsFragment()
+        val tag = "tab_$pos"
+        var frag = supportFragmentManager.findFragmentByTag(tag)
+        if (frag == null) {
+            frag = when (pos) {
+                0 -> CollectorFragment()
+                1 -> LibraryFragment()
+                else -> SettingsFragment()
+            }
+            supportFragmentManager.beginTransaction()
+                .add(R.id.container, frag, tag)
+                .commitNowAllowingStateLoss()
         }
-        supportFragmentManager.beginTransaction()
-            .replace(R.id.container, frag)
-            .commitNowAllowingStateLoss()
+        supportFragmentManager.fragments.forEach { f ->
+            if (f != frag) supportFragmentManager.beginTransaction().hide(f).commitNowAllowingStateLoss()
+        }
+        supportFragmentManager.beginTransaction().show(frag).commitNowAllowingStateLoss()
     }
 }

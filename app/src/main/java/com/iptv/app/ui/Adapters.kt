@@ -26,6 +26,7 @@ class ChannelAdapter(
         val url: TextView = v.findViewById(R.id.tvUrl)
         val status: TextView = v.findViewById(R.id.tvStatus)
         val play: ImageButton = v.findViewById(R.id.btnPlay)
+        val logoText: TextView? = v.findViewById(R.id.tvLogoText)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH =
@@ -40,21 +41,25 @@ class ChannelAdapter(
             if (ch.speedKBps > 0) append(" · ${ch.speedKBps}KB/s")
         }
         holder.url.text = ch.url
-        holder.status.text = when (ch.status) {
-            Channel.STATUS_OK -> "可用"
-            Channel.STATUS_FAIL -> "不可用"
-            else -> "未检测"
+        val ctx = holder.itemView.context
+        // 状态徽章
+        val (statusText, statusColor, statusBg) = when (ch.status) {
+            Channel.STATUS_OK -> Triple(
+                if (ch.latencyMs > 0) "可用 ${ch.latencyMs}ms" else "可用",
+                ContextCompat.getColor(ctx, R.color.success), R.drawable.bg_status_ok
+            )
+            Channel.STATUS_FAIL -> Triple("失效", ContextCompat.getColor(ctx, R.color.error), R.drawable.bg_status_fail)
+            else -> Triple("未检测", ContextCompat.getColor(ctx, R.color.text_secondary), R.drawable.bg_status_unknown)
         }
-        val c = when (ch.status) {
-            Channel.STATUS_OK -> R.color.green
-            Channel.STATUS_FAIL -> R.color.red
-            else -> R.color.text_secondary
-        }
-        holder.status.setTextColor(ContextCompat.getColor(holder.itemView.context, c))
+        holder.status.text = statusText
+        holder.status.setTextColor(statusColor)
+        holder.status.setBackgroundResource(statusBg)
+        // 台标首字
+        holder.logoText?.text = ch.name.trim().take(2).ifBlank { "TV" }
+        // 深色主题（播放器抽屉）下调整文字
         if (darkTheme) {
-            val white = ContextCompat.getColor(holder.itemView.context, android.R.color.white)
+            val white = ContextCompat.getColor(ctx, android.R.color.white)
             holder.name.setTextColor(white)
-            holder.group.setTextColor(white)
             holder.url.setTextColor(white)
         }
         holder.play.setOnClickListener { onPlay(ch) }

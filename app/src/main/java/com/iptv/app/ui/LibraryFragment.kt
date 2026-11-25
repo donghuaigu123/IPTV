@@ -40,6 +40,7 @@ class LibraryFragment : Fragment() {
     private lateinit var recycler: RecyclerView
     private lateinit var chipGroups: ChipGroup
     private lateinit var adapter: ChannelAdapter
+    private lateinit var emptyState: View
     private var allChannels: List<Channel> = emptyList()
     private var currentGroup = "全部"
 
@@ -48,6 +49,7 @@ class LibraryFragment : Fragment() {
         etSearch = v.findViewById(R.id.etSearch)
         recycler = v.findViewById(R.id.recyclerChannels)
         chipGroups = v.findViewById(R.id.chipGroups)
+        emptyState = v.findViewById(R.id.emptyState)
 
         adapter = ChannelAdapter(mutableListOf(), onPlay = { ch ->
             val idx = allChannels.indexOfFirst { it.url == ch.url && it.name == ch.name }
@@ -77,6 +79,11 @@ class LibraryFragment : Fragment() {
         reload()
     }
 
+    override fun onHiddenChanged(hidden: Boolean) {
+        super.onHiddenChanged(hidden)
+        if (!hidden && isAdded) reload()
+    }
+
     private fun reload() {
         allChannels = Prefs.getChannels(requireContext())
         buildChips()
@@ -104,6 +111,7 @@ class LibraryFragment : Fragment() {
                 (q.isBlank() || ch.name.contains(q, true) || ch.url.contains(q, true))
         }
         adapter.submit(list)
+        emptyState.visibility = if (allChannels.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun showChannelMenu(ch: Channel) {

@@ -41,7 +41,11 @@ class CollectorFragment : Fragment() {
     private lateinit var recyclerSources: RecyclerView
     private lateinit var swipe: SwipeRefreshLayout
     private lateinit var tvDir: TextView
+    private lateinit var tvStatChannels: TextView
+    private lateinit var tvStatOk: TextView
+    private lateinit var tvStatSources: TextView
     private lateinit var sourceAdapter: SourceAdapter
+    private var collector: SourceCollector? = null
     private var job: Job? = null
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -54,6 +58,9 @@ class CollectorFragment : Fragment() {
         recyclerSources = v.findViewById(R.id.recyclerSources)
         swipe = v.findViewById(R.id.swipe)
         tvDir = v.findViewById(R.id.tvDir)
+        tvStatChannels = v.findViewById(R.id.tvStatChannels)
+        tvStatOk = v.findViewById(R.id.tvStatOk)
+        tvStatSources = v.findViewById(R.id.tvStatSources)
 
         setupSources()
         updateDirLabel()
@@ -62,6 +69,7 @@ class CollectorFragment : Fragment() {
         btnCollect.setOnClickListener { startCollect() }
         btnCheck.setOnClickListener { startCheck() }
         swipe.setOnRefreshListener { startCollect() }
+        v.findViewById<MaterialButton>(R.id.btnDiagnosis).setOnClickListener { showDiagnosis() }
 
         v.findViewById<MaterialButton>(R.id.btnAddSource).setOnClickListener { editSource(null) }
         v.findViewById<MaterialButton>(R.id.btnResetSources).setOnClickListener {
@@ -154,8 +162,9 @@ class CollectorFragment : Fragment() {
             btnCollect.isEnabled = false
             swipe.isRefreshing = true
             val sources = Prefs.getSources(ctx)
-            val collector = SourceCollector(ctx)
-            val channels = collector.collect(sources) { p -> updateProgress(p) }
+            val c = SourceCollector(ctx)
+            collector = c
+            val channels = c.collect(sources) { p -> updateProgress(p) }
             Prefs.saveChannels(ctx, channels)
             updateSummary()
             btnCollect.isEnabled = true
@@ -194,9 +203,36 @@ class CollectorFragment : Fragment() {
     }
 
     private fun updateSummary() {
-        val list = Prefs.getChannels(requireContext())
+        val ctx = requireContext()
+        val list = Prefs.getChannels(ctx)
         val ok = list.count { it.isOk }
-        tvSummary.text = "频道 ${list.size} 个 · 可用 $ok 个 · 不可用 ${list.count { it.status == com.iptv.app.model.Channel.STATUS_FAIL }} 个"
+        val fail = list.count { it.status == com.iptv.app.model.Channel.STATUS_FAIL }
+        tvStatChannels.text = list.size.toString()
+        tvStatOk.text = ok.toString()
+        tvStatSources.text = Prefs.getSources(ctx).count { it.enabled }.toString()
+        tvSummary.text = "共 ${list.size} 个频道 · 可用 $ok · 失效 $fail"
+    }
+
+    /** 展示每个数据源的采集诊断信息 */
+    private fun showDiagnosis() {
+        val results = collector?.getLastResults() ?: emptyList()
+        if (results.isEmpty()) {
+            Toast.makeText(requireContext(), "请先执行一次采集", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val sb = StringBuilder()
+        val okCount = results.count { it.success }
+        sb.append("成功 $okCount / ${results.size} 个数据源\n\n")
+        results.sortedBy { it.success }.forEach { r ->
+            val icon = if (r.success) "✓" else "✕"
+            val info = if (r.success) "+${r.count} 频道 · ${r.usedMirror}" else r.detail
+            sb.append("$icon ${r.name}\n   $info\n")
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle("采集诊断详情")
+            .setMessage(sb.toString())
+            .setPositiveButton(R.string.ok, null)
+            .show()
     }
 
     private fun chooseDir() {

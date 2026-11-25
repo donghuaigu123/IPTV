@@ -53,4 +53,11 @@
     <string name="track_selection">音轨 / 字幕</string>
     <string name="tvbox_source">TVBox 订阅</string>
     <string name="raw_url">原始地址</string>
+    <string name="app_tagline">全网直播源采集 · 智能检测 · 全能播放</string>
+    <string name="source_diagnosis">采集诊断</string>
+    <string name="collected_channels">已采集频道</string>
+    <string name="available_channels">可用源</string>
+    <string name="total_sources">数据源</string>
+    <string name="empty_state_hint">还没有频道，开始采集或导入吧</string>
+    <string name="view_diagnosis">查看采集详情</string>
 </resources>
