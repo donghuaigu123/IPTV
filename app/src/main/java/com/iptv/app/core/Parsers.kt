@@ -184,6 +184,46 @@ object Parsers {
         return out
     }
 
+    /**
+     * 解析 TVBox 配置中的 lives 字段，得到可直接播放的频道。
+     * 兼容 url 为单个字符串或字符串数组（多线路）两种写法。
+     */
+    fun parseTvBoxLives(text: String, source: String): List<Channel> {
+        val out = mutableListOf<Channel>()
+        try {
+            val root = JsonParser.parseString(text)
+            if (!root.isJsonObject) return out
+            val obj = root.asJsonObject
+            val lives = (listOf("lives", "live").firstOrNull { obj.has(it) && obj.get(it).isJsonArray })
+                ?.let { obj.getAsJsonArray(it) } ?: return out
+            lives.forEach { el ->
+                if (!el.isJsonObject) return@forEach
+                val o = el.asJsonObject
+                val name = o.str("name") ?: o.str("title") ?: return@forEach
+                val group = o.str("group") ?: o.str("group_name") ?: "TVBox"
+                val urlEl = o.get("url") ?: o.get("play_url") ?: return@forEach
+                val urls = when {
+                    urlEl.isJsonPrimitive -> listOf(urlEl.asString)
+                    urlEl.isJsonArray -> urlEl.asJsonArray.mapNotNull {
+                        if (it.isJsonPrimitive) it.asString else null
+                    }
+                    else -> emptyList()
+                }
+                urls.map { it.trim() }.filter { it.contains("://") }.forEach { u ->
+                    out += Channel(
+                        name = name,
+                        url = u,
+                        group = SourceCatalog.categoryOf(name, group),
+                        logo = o.str("logo") ?: "",
+                        source = source,
+                        rawLine = "TVBoxLive"
+                    )
+                }
+            }
+        } catch (_: Exception) { }
+        return out
+    }
+
     private fun com.google.gson.JsonObject.int(key: String): Int =
         try { if (has(key) && !get(key).isJsonNull) get(key).asInt else 0 } catch (_: Exception) { 0 }
 

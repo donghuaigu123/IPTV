@@ -25,6 +25,7 @@ import com.iptv.app.core.Exporter
 import com.iptv.app.core.SourceCollector
 import com.iptv.app.data.Prefs
 import com.iptv.app.data.SourceCatalog
+import com.iptv.app.model.Channel
 import com.iptv.app.model.CollectProgress
 import com.iptv.app.model.ExportFormat
 import com.iptv.app.model.SourceConfig
@@ -208,9 +209,26 @@ class CollectorFragment : Fragment() {
             if (channels.isEmpty()) return
             val checker = ChannelChecker(ctx)
             val checked = checker.check(channels) { p -> updateProgress(p) }
-            Prefs.saveChannels(ctx, checked)
+            val valid = checked.filter { it.status == Channel.STATUS_OK }
+            val invalidCount = checked.size - valid.size
+            val purge = Prefs.getBool(ctx, Prefs.KEY_PURGE_INVALID, true)
+            when {
+                // 检测后有可用源：清除全部无效源，只保留有效源
+                purge && invalidCount > 0 && valid.isNotEmpty() -> {
+                    Prefs.saveChannels(ctx, valid)
+                    safeToast(ctx, "检测完成：保留 ${valid.size} 个有效源，已自动清除 $invalidCount 个无效源")
+                }
+                // 全部无效：多半是网络波动或误判，保留原列表避免数据全丢，交给用户判断
+                purge && invalidCount > 0 && valid.isEmpty() -> {
+                    Prefs.saveChannels(ctx, checked)
+                    safeToast(ctx, "本次检测没有可用源，可能是网络异常，已保留原列表")
+                }
+                else -> {
+                    Prefs.saveChannels(ctx, checked)
+                    safeToast(ctx, "检测完成：可用 ${valid.size} 个，无效 $invalidCount 个")
+                }
+            }
             updateSummary()
-            safeToast(ctx, "检测完成：可用 ${checked.count { it.isOk }} 个")
         } catch (e: kotlinx.coroutines.CancellationException) {
         } catch (e: Exception) {
             safeToast(ctx, "检测失败：${e.message?.take(50)}")
@@ -309,9 +327,11 @@ class CollectorFragment : Fragment() {
 
     private fun export(format: ExportFormat) {
         val ctx = requireContext().applicationContext
-        val channels = Prefs.getChannels(ctx)
+        // 只导出有效源：明确检测失败的源一律排除；未检测的源（UNKNOWN）保留，
+        // 用户可在「可用性检测」后再次导出，即可得到纯有效源列表。
+        val channels = Prefs.getChannels(ctx).filter { it.status != Channel.STATUS_FAIL }
         if (channels.isEmpty()) {
-            safeToast(ctx, "没有可导出的频道")
+            safeToast(ctx, "没有有效源可导出，请先做可用性检测")
             return
         }
         if (Prefs.getTreeUri(ctx) == null) {
@@ -323,7 +343,9 @@ class CollectorFragment : Fragment() {
             try {
                 val result = Exporter(ctx).export(channels, format)
                 result.fold(
-                    onSuccess = { uri -> safeToast(ctx, getString(R.string.export_success, uri.lastPathSegment ?: "文件")) },
+                    onSuccess = { uri ->
+                        safeToast(ctx, "已导出 ${channels.size} 个有效源：${uri.lastPathSegment ?: "文件"}")
+                    },
                     onFailure = { e -> safeToast(ctx, getString(R.string.export_fail, e.message ?: "未知错误")) }
                 )
             } catch (e: Exception) {

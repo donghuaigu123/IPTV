@@ -74,6 +74,7 @@ object Prefs {
     const val KEY_TIMEOUT = "check_timeout"          // 秒
     const val KEY_CONCURRENCY = "check_concurrency"
     const val KEY_AUTO_CHECK = "auto_check"
+    const val KEY_PURGE_INVALID = "purge_invalid"     // 检测后自动清除无效源，默认开启
     const val KEY_DECODER = "decoder"                 // 0=自动 1=硬解优先 2=软解优先
     const val KEY_BUFFER = "buffer_mode"              // 0=默认 1=低延迟 2=大缓冲
     const val KEY_RETAIN_DUP = "retain_duplicate"

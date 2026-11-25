@@ -60,4 +60,16 @@
     <string name="total_sources">数据源</string>
     <string name="empty_state_hint">还没有频道，开始采集或导入吧</string>
     <string name="view_diagnosis">查看采集详情</string>
+    <!-- v1.3 新增 -->
+    <string name="purge_invalid">检测后自动清除无效源（只保留有效源）</string>
+    <string name="import_live">直播源导入</string>
+    <string name="import_tvbox">TVBox 源导入</string>
+    <string name="import_tips">M3U / M3U8 / TXT / JSON · 网址 / 文件 / 剪贴板</string>
+    <string name="tvbox_tips">导入 TVBox 订阅配置，自动提取直播线路</string>
+    <string name="import_tvbox_hint">输入 TVBox 订阅地址（返回配置 JSON）</string>
+    <string name="import_tvbox_paste_hint">或直接粘贴 TVBox 配置 JSON…</string>
+    <string name="import_tvbox_from_url">从订阅地址导入</string>
+    <string name="import_tvbox_from_paste">从配置 JSON 导入</string>
+    <string name="tvbox_imported">TVBox 导入完成：%1$d 个频道</string>
+    <string name="export_valid_hint">仅导出检测有效的直播源，兼容各类播放器</string>
 </resources>

@@ -22,6 +22,7 @@ class SettingsFragment : Fragment() {
     private lateinit var etTimeout: EditText
     private lateinit var etConcurrency: EditText
     private lateinit var swAutoCheck: SwitchMaterial
+    private lateinit var swPurgeInvalid: SwitchMaterial
     private lateinit var swRetainDup: SwitchMaterial
     private lateinit var spDecoder: Spinner
     private lateinit var spBuffer: Spinner
@@ -32,6 +33,7 @@ class SettingsFragment : Fragment() {
         etTimeout = v.findViewById(R.id.etTimeout)
         etConcurrency = v.findViewById(R.id.etConcurrency)
         swAutoCheck = v.findViewById(R.id.swAutoCheck)
+        swPurgeInvalid = v.findViewById(R.id.swPurgeInvalid)
         swRetainDup = v.findViewById(R.id.swRetainDup)
         spDecoder = v.findViewById(R.id.spDecoder)
         spBuffer = v.findViewById(R.id.spBuffer)
@@ -41,6 +43,7 @@ class SettingsFragment : Fragment() {
         etTimeout.setText(Prefs.getInt(ctx, Prefs.KEY_TIMEOUT, 8).toString())
         etConcurrency.setText(Prefs.getInt(ctx, Prefs.KEY_CONCURRENCY, 24).toString())
         swAutoCheck.isChecked = Prefs.getBool(ctx, Prefs.KEY_AUTO_CHECK, true)
+        swPurgeInvalid.isChecked = Prefs.getBool(ctx, Prefs.KEY_PURGE_INVALID, true)
         swRetainDup.isChecked = Prefs.getBool(ctx, Prefs.KEY_RETAIN_DUP, true)
         spDecoder.setSelection(Prefs.getInt(ctx, Prefs.KEY_DECODER, 0).coerceIn(0, 2))
         spBuffer.setSelection(Prefs.getInt(ctx, Prefs.KEY_BUFFER, 0).coerceIn(0, 2))
@@ -57,6 +60,7 @@ class SettingsFragment : Fragment() {
             Prefs.putInt(ctx, Prefs.KEY_TIMEOUT, timeout)
             Prefs.putInt(ctx, Prefs.KEY_CONCURRENCY, concurrency)
             Prefs.putBool(ctx, Prefs.KEY_AUTO_CHECK, swAutoCheck.isChecked)
+            Prefs.putBool(ctx, Prefs.KEY_PURGE_INVALID, swPurgeInvalid.isChecked)
             Prefs.putBool(ctx, Prefs.KEY_RETAIN_DUP, swRetainDup.isChecked)
             Prefs.putInt(ctx, Prefs.KEY_DECODER, spDecoder.selectedItemPosition)
             Prefs.putInt(ctx, Prefs.KEY_BUFFER, spBuffer.selectedItemPosition)

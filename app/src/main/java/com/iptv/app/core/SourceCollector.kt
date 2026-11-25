@@ -137,10 +137,13 @@ class SourceCollector(private val context: Context) {
     fun parseImported(text: String, label: String): List<Channel> {
         val head = text.trimStart().take(200)
         return when {
-            head.startsWith("{") && text.contains("\"sites\"") -> {
-                Parsers.tvBoxDirectUrls(text).mapIndexed { i, (name, url) ->
+            head.startsWith("{") && (text.contains("\"sites\"") || text.contains("\"lives\"")) -> {
+                // lives = 可直接播放的频道；sites 中的 m3u/txt 地址作为线路补充
+                val lives = Parsers.parseTvBoxLives(text, label)
+                val direct = Parsers.tvBoxDirectUrls(text).mapIndexed { i, (name, url) ->
                     Channel(name, url, group = "TVBox", source = label, rawLine = "TVBox#$i")
                 }
+                (lives + direct).distinctBy { it.url }
             }
             else -> Parsers.parseAny(text, label)
         }

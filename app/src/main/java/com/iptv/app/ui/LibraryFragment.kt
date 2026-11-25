@@ -66,6 +66,7 @@ class LibraryFragment : Fragment() {
         })
 
         v.findViewById<MaterialButton>(R.id.btnImport).setOnClickListener { showImportDialog() }
+        v.findViewById<MaterialButton>(R.id.btnImportTvbox).setOnClickListener { showTvBoxImportDialog() }
         v.findViewById<View>(R.id.fabPlayAll).setOnClickListener {
             if (allChannels.isNotEmpty()) openPlayer(allChannels, 0)
             else Toast.makeText(requireContext(), "暂无频道", Toast.LENGTH_SHORT).show()
@@ -205,6 +206,65 @@ class LibraryFragment : Fragment() {
             }
         }
         dlg.show()
+    }
+
+    /** 独立的 TVBox 订阅导入入口：订阅地址或配置 JSON 两种方式 */
+    private fun showTvBoxImportDialog() {
+        val ctx = requireContext()
+        val view = layoutInflater.inflate(R.layout.dialog_tvbox_import, null)
+        val etUrl = view.findViewById<EditText>(R.id.etTvBoxUrl)
+        val etPaste = view.findViewById<EditText>(R.id.etTvBoxPaste)
+        val dlg = AlertDialog.Builder(ctx).setTitle(R.string.import_tvbox).setView(view).create()
+
+        view.findViewById<MaterialButton>(R.id.btnTvBoxUrl).setOnClickListener {
+            val url = etUrl.text.toString().trim()
+            if (!url.contains("://")) {
+                Toast.makeText(ctx, "请输入有效的订阅地址", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            dlg.dismiss()
+            lifecycleScope.launch {
+                val text = withContext(Dispatchers.IO) { fetchText(url) }
+                if (text.isNullOrBlank()) {
+                    Toast.makeText(ctx, "导入失败：无法获取 TVBox 订阅配置", Toast.LENGTH_LONG).show()
+                } else {
+                    importTvBoxText(ctx, text, "TVBox:${url.take(24)}")
+                }
+            }
+        }
+
+        view.findViewById<MaterialButton>(R.id.btnTvBoxPaste).setOnClickListener {
+            var text = etPaste.text.toString()
+            if (text.isBlank()) {
+                try {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    text = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                } catch (_: Exception) {}
+            }
+            if (text.isBlank()) {
+                Toast.makeText(ctx, "没有可导入的配置内容", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            importTvBoxText(ctx, text, "TVBox:手动导入")
+            dlg.dismiss()
+        }
+        dlg.show()
+    }
+
+    private fun importTvBoxText(ctx: Context, text: String, label: String) {
+        try {
+            val chans = SourceCollector(ctx.applicationContext).parseImported(text, label)
+            if (chans.isEmpty()) {
+                Toast.makeText(ctx, "未识别到 TVBox 直播线路", Toast.LENGTH_LONG).show()
+                return
+            }
+            val merged = (Prefs.getChannels(ctx) + chans).distinctBy { it.name + it.url }
+            Prefs.saveChannels(ctx, merged)
+            reload()
+            Toast.makeText(ctx, getString(R.string.tvbox_imported, chans.size), Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "TVBox 导入异常：${e.message?.take(50)}", Toast.LENGTH_LONG).show()
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

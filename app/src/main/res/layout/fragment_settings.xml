@@ -71,6 +71,11 @@
                     android:text="@string/auto_check" android:textColor="@color/text_primary" />
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/swPurgeInvalid" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:layout_marginTop="6dp"
+                    android:text="@string/purge_invalid" android:textColor="@color/text_primary" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/swRetainDup" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:layout_marginTop="6dp"
                     android:text="@string/retain_duplicate" android:textColor="@color/text_primary" />

@@ -211,7 +211,7 @@
                         android:layout_height="wrap_content" android:text="@string/export" />
                     <TextView style="@style/TextCaption" android:layout_width="wrap_content"
                         android:layout_height="wrap_content" android:layout_marginTop="4dp"
-                        android:text="导出到自定义目录，兼容各类播放器" />
+                        android:text="@string/export_valid_hint" />
 
                     <GridLayout
                         android:layout_width="match_parent"
