@@ -15,7 +15,7 @@
         <ImageView
             android:layout_width="32dp"
             android:layout_height="32dp"
-            android:background="@drawable/grad_tvbox"
+            android:background="@drawable/grad_brand"
             android:contentDescription="@string/import_tvbox"
             android:padding="6dp"
             android:src="@drawable/ic_tvbox"
@@ -50,7 +50,6 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
-        android:background="@drawable/grad_btn"
         android:text="@string/import_tvbox_from_url" />
 
     <View

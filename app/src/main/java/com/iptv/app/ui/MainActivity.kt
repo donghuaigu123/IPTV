@@ -1,9 +1,11 @@
 package com.iptv.app.ui
 
 import android.os.Bundle
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.iptv.app.BuildConfig
 import com.iptv.app.R
 
 class MainActivity : AppCompatActivity() {
@@ -15,6 +17,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        findViewById<TextView>(R.id.tvVersion).text = "v${BuildConfig.VERSION_NAME}"
         bottomNav = findViewById(R.id.bottomNav)
 
         bottomNav.setOnItemSelectedListener { item ->

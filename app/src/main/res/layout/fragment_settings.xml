@@ -114,7 +114,7 @@
             android:id="@+id/btnSaveSettings"
             style="@style/BtnPrimary"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="18dp" android:background="@drawable/grad_btn"
+            android:layout_marginTop="18dp"
             android:text="@string/ok" />
 
         <!-- 关于 -->
