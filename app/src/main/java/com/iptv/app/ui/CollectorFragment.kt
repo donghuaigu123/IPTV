@@ -167,17 +167,26 @@ class CollectorFragment : Fragment() {
                 val c = SourceCollector(ctx)
                 collector = c
                 val channels = c.collect(sources) { p -> updateProgress(p) }
-                // 过滤用户已主动删除的频道，避免采集后又被加回
+                // 关键：只替换"本次启用的采集源"对应的频道，其他来源（手动导入直播源 / TVBox源）原样保留。
+                // 用户已主动删除的频道（回收站）依然过滤，避免采集后又加回。
                 val removed = Prefs.getRemovedKeys(ctx)
-                val kept = channels.filterNot { removed.contains(it.identity) }
-                Prefs.saveChannels(ctx, kept)
+                val collectedKeys = sources.filter { it.enabled }.map { src ->
+                    val kind = if (src.type == SourceConfig.TYPE_TVBOX) Channel.ORIGIN_TVBOX else Channel.ORIGIN_COLLECT
+                    "$kind|${src.name}|${src.url}"
+                }.toSet()
+                val existing = Prefs.getChannels(ctx)
+                val untouched = existing.filterNot { collectedKeys.contains("${it.originKind}|${it.originKey}") }
+                val freshKept = channels.filterNot { removed.contains(it.identity) }
+                val merged = (untouched + freshKept).distinctBy { it.identity }
+                Prefs.saveChannels(ctx, merged)
                 updateSummary()
 
-                if (Prefs.getBool(ctx, Prefs.KEY_AUTO_CHECK, true) && kept.isNotEmpty()) {
-                    // 在同一协程里直接执行检测，避免 startCheck() 内部 job?.cancel() 取消自身导致协程异常
-                    doCheck(ctx)
+                if (Prefs.getBool(ctx, Prefs.KEY_AUTO_CHECK, true) && freshKept.isNotEmpty()) {
+                    // 在同一协程里直接执行检测，避免 startCheck() 内部 job?.cancel() 取消自身导致协程异常。
+                    // 传入本次采集频道作为检测范围，无效源清理不会波及手动导入的直播源 / TVBox源。
+                    doCheck(ctx, freshKept.map { it.identity }.toSet())
                 } else {
-                    safeToast(ctx, "采集完成：${kept.size} 个频道（已排除 ${channels.size - kept.size} 个删除项）")
+                    safeToast(ctx, "采集完成：更新 ${freshKept.size} 个频道，其他来源 ${untouched.size} 个已保留")
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 用户主动取消，正常退出
@@ -203,31 +212,42 @@ class CollectorFragment : Fragment() {
         job = lifecycleScope.launch { doCheck(ctx) }
     }
 
-    /** 执行可用性检测（suspend，供采集后自动检测与手动检测共用） */
-    private suspend fun doCheck(ctx: android.content.Context) {
+    /**
+     * 执行可用性检测（suspend，供采集后自动检测与手动检测共用）。
+     * @param scope 仅检测这些 identity 的频道；null 表示检测全部。
+     *              采集后的自动检测只传本次采集频道，确保清理无效源时不误删手动导入的直播源 / TVBox源。
+     */
+    private suspend fun doCheck(ctx: android.content.Context, scope: Set<String>? = null) {
         if (!isAdded) return
         btnCheck.isEnabled = false
         try {
-            val channels = Prefs.getChannels(ctx)
-            if (channels.isEmpty()) return
+            val all = Prefs.getChannels(ctx)
+            if (all.isEmpty()) return
+            val targets = if (scope == null) all else all.filter { scope.contains(it.identity) }
+            if (targets.isEmpty()) return
             val checker = ChannelChecker(ctx)
-            val checked = checker.check(channels) { p -> updateProgress(p) }
+            val checked = checker.check(targets) { p -> updateProgress(p) }
+            val checkedIds = checked.map { it.identity }.toSet()
             val valid = checked.filter { it.status == Channel.STATUS_OK }
             val invalidCount = checked.size - valid.size
             val purge = Prefs.getBool(ctx, Prefs.KEY_PURGE_INVALID, true)
+            // 把本次检测结果合并回全量列表：未参与检测的频道（其他来源）保持原样不被改动
+            val byIdentity = checked.associateBy { it.identity }
+            val merged = all.map { byIdentity[it.identity] ?: it }.toMutableList()
             when {
-                // 检测后有可用源：清除全部无效源，只保留有效源
+                // 检测后有可用源：只清除本次检测范围内确认失效的源，其他来源完全不受影响
                 purge && invalidCount > 0 && valid.isNotEmpty() -> {
-                    Prefs.saveChannels(ctx, valid)
-                    safeToast(ctx, "检测完成：保留 ${valid.size} 个有效源，已自动清除 $invalidCount 个无效源")
+                    merged.removeAll { checkedIds.contains(it.identity) && it.status == Channel.STATUS_FAIL }
+                    Prefs.saveChannels(ctx, merged)
+                    safeToast(ctx, "检测完成：保留 ${valid.size} 个有效源，已清除 $invalidCount 个无效源（其他来源未改动）")
                 }
                 // 全部无效：多半是网络波动或误判，保留原列表避免数据全丢，交给用户判断
                 purge && invalidCount > 0 && valid.isEmpty() -> {
-                    Prefs.saveChannels(ctx, checked)
+                    Prefs.saveChannels(ctx, merged)
                     safeToast(ctx, "本次检测没有可用源，可能是网络异常，已保留原列表")
                 }
                 else -> {
-                    Prefs.saveChannels(ctx, checked)
+                    Prefs.saveChannels(ctx, merged)
                     safeToast(ctx, "检测完成：可用 ${valid.size} 个，无效 $invalidCount 个")
                 }
             }
