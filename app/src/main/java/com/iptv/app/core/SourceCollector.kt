@@ -61,7 +61,9 @@ class SourceCollector(private val context: Context) {
                         "${src.name} $short${if (info.usedMirror.isNotBlank()) " · ${info.usedMirror}" else ""}"
                     )
                 )
-                result.channels
+                // 给该来源的频道打上"网络采集源"标记，originKey 用源名称+URL区分不同订阅
+                val kind = if (src.type == SourceConfig.TYPE_TVBOX) Channel.ORIGIN_TVBOX else Channel.ORIGIN_COLLECT
+                SourceOrigin.tag(result.channels, kind, "${src.name}|${src.url}")
             }
         }.awaitAll()
 

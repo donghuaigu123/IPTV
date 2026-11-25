@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.iptv.app.core.SourceOrigin
 import com.iptv.app.model.Channel
 import com.iptv.app.model.SourceConfig
 
@@ -45,19 +46,19 @@ object Prefs {
 
     // ---------------- 频道缓存 ----------------
     fun getChannels(c: Context): MutableList<Channel> =
-        ctx(c).getJson("channels", mutableListOf<Channel>()).toMutableList()
+        SourceOrigin.decorate(ctx(c).getJson("channels", mutableListOf<Channel>())).toMutableList()
 
     fun saveChannels(c: Context, list: List<Channel>) {
-        ctx(c).edit().putString("channels", gson.toJson(list)).apply()
+        ctx(c).edit().putString("channels", gson.toJson(SourceOrigin.decorate(list))).apply()
     }
 
     // ---------------- 已删除频道回收站 ----------------
     /** 保存用户主动删除的频道（含完整信息，便于回收站原样恢复） */
     fun getRecycleBin(c: Context): MutableList<Channel> =
-        ctx(c).getJson("recycle_bin", mutableListOf<Channel>()).toMutableList()
+        SourceOrigin.decorate(ctx(c).getJson("recycle_bin", mutableListOf<Channel>())).toMutableList()
 
     fun saveRecycleBin(c: Context, list: List<Channel>) {
-        ctx(c).edit().putString("recycle_bin", gson.toJson(list)).apply()
+        ctx(c).edit().putString("recycle_bin", gson.toJson(SourceOrigin.decorate(list))).apply()
     }
 
     /** 用户删除的频道唯一键（name+url），采集/导入时据此过滤，避免删了又被加回 */

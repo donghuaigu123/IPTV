@@ -24,6 +24,7 @@ import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import com.iptv.app.R
 import com.iptv.app.core.SourceCollector
+import com.iptv.app.core.SourceOrigin
 import com.iptv.app.core.TvBoxImporter
 import com.iptv.app.data.PlaylistBus
 import com.iptv.app.data.Prefs
@@ -40,10 +41,13 @@ class LibraryFragment : Fragment() {
     private lateinit var etSearch: EditText
     private lateinit var recycler: RecyclerView
     private lateinit var chipGroups: ChipGroup
+    private lateinit var chipOrigins: ChipGroup
     private lateinit var adapter: ChannelAdapter
     private lateinit var emptyState: View
     private var allChannels: List<Channel> = emptyList()
+    private var visibleChannels: List<Channel> = emptyList()
     private var currentGroup = "全部"
+    private var currentOrigin = "all"   // all 或 SourceOrigin.OriginGroup.id
     private var manageMode = false
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -51,13 +55,14 @@ class LibraryFragment : Fragment() {
         etSearch = v.findViewById(R.id.etSearch)
         recycler = v.findViewById(R.id.recyclerChannels)
         chipGroups = v.findViewById(R.id.chipGroups)
+        chipOrigins = v.findViewById(R.id.chipOrigins)
         emptyState = v.findViewById(R.id.emptyState)
 
         adapter = ChannelAdapter(
             mutableListOf(),
             onPlay = { ch ->
-                val idx = allChannels.indexOfFirst { it.identity == ch.identity }
-                openPlayer(allChannels, if (idx >= 0) idx else 0)
+                val idx = visibleChannels.indexOfFirst { it.identity == ch.identity }
+                openPlayer(visibleChannels, if (idx >= 0) idx else 0)
             },
             onLongClick = { ch -> showChannelMenu(ch) },
             onDelete = { ch -> confirmDelete(ch) }
@@ -75,8 +80,8 @@ class LibraryFragment : Fragment() {
         v.findViewById<MaterialButton>(R.id.btnImportTvbox).setOnClickListener { showTvBoxImportDialog() }
         v.findViewById<View>(R.id.fabPlayAll).setOnClickListener {
             if (manageMode) { toggleManageMode(v); return@setOnClickListener }
-            if (allChannels.isNotEmpty()) openPlayer(allChannels, 0)
-            else Toast.makeText(requireContext(), "暂无频道", Toast.LENGTH_SHORT).show()
+            if (visibleChannels.isNotEmpty()) openPlayer(visibleChannels, 0)
+            else Toast.makeText(requireContext(), "当前筛选下暂无频道", Toast.LENGTH_SHORT).show()
         }
 
         v.findViewById<MaterialButton>(R.id.btnManage).setOnClickListener { toggleManageMode(v) }
@@ -102,19 +107,50 @@ class LibraryFragment : Fragment() {
 
     private fun reload() {
         allChannels = Prefs.getChannels(requireContext())
+        buildOriginChips()
         buildChips()
         filter()
     }
 
+    /** 按来源大类 + 订阅实例生成 chip，可自由切换；同一大类多订阅带 ①②③ 后缀 */
+    private fun buildOriginChips() {
+        chipOrigins.removeAllViews()
+        val groups = SourceOrigin.groups(allChannels)
+        // 若当前选中的来源已不存在，回退到全部
+        if (currentOrigin != "all" && groups.none { it.id == currentOrigin }) currentOrigin = "all"
+
+        val allChip = Chip(requireContext()).apply {
+            text = getString(R.string.all_sources)
+            isCheckable = true
+            isChecked = currentOrigin == "all"
+            setOnClickListener { currentOrigin = "all"; buildOriginChips(); filter() }
+        }
+        chipOrigins.addView(allChip)
+
+        groups.forEach { g ->
+            val chip = Chip(requireContext()).apply {
+                text = "${g.label} (${g.count})"
+                isCheckable = true
+                isChecked = g.id == currentOrigin
+                setOnClickListener { currentOrigin = g.id; buildOriginChips(); filter() }
+            }
+            chipOrigins.addView(chip)
+        }
+    }
+
     private fun buildChips() {
         chipGroups.removeAllViews()
-        val groups = listOf("全部") + allChannels.map { it.group }.distinct().sorted().take(15)
+        // 分组只统计当前来源下的频道，切换来源后分组随之更新
+        val scoped = if (currentOrigin == "all") allChannels
+        else allChannels.filter { "${it.originKind}|${it.originKey.ifBlank { it.originKind }}" == currentOrigin }
+        val groups = listOf("全部") + scoped.map { it.group }.distinct().sorted().take(15)
+        if (groups.none { it == currentGroup }) currentGroup = "全部"
         groups.forEach { g ->
             val chip = Chip(requireContext()).apply {
                 text = g
                 isCheckable = true
                 isChecked = g == currentGroup
-                setOnClickListener { currentGroup = g; filter() }
+                setOnClickListener { currentGroup = g; buildChips(); filter() }
             }
             chipGroups.addView(chip)
         }
@@ -123,9 +159,12 @@ class LibraryFragment : Fragment() {
     private fun filter() {
         val q = etSearch.text.toString().trim()
         val list = allChannels.filter { ch ->
+            (currentOrigin == "all" ||
+                "${ch.originKind}|${ch.originKey.ifBlank { ch.originKind }}" == currentOrigin) &&
             (currentGroup == "全部" || ch.group == currentGroup) &&
-                (q.isBlank() || ch.name.contains(q, true) || ch.url.contains(q, true))
+            (q.isBlank() || ch.name.contains(q, true) || ch.url.contains(q, true))
         }
+        visibleChannels = list
         adapter.submit(list)
         emptyState.visibility = if (allChannels.isEmpty()) View.VISIBLE else View.GONE
     }
@@ -271,10 +310,19 @@ class LibraryFragment : Fragment() {
         Toast.makeText(requireContext(), "已复制", Toast.LENGTH_SHORT).show()
     }
 
-    /** 合并新导入频道到现有列表，并过滤已在回收站中的频道（删了就不会被导入加回） */
-    private fun mergeChannels(ctx: Context, incoming: List<Channel>): List<Channel> {
+    /**
+     * 合并新导入频道到现有列表，并过滤已在回收站中的频道（删了就不会被导入加回）。
+     * 同时给新频道打来源标记，使频道页可按来源分类切换显示。
+     */
+    private fun mergeChannels(
+        ctx: Context,
+        incoming: List<Channel>,
+        kind: String = Channel.ORIGIN_LIVE,
+        originKey: String = "手动导入"
+    ): List<Channel> {
         val removed = Prefs.getRemovedKeys(ctx)
-        return (Prefs.getChannels(ctx) + incoming)
+        val tagged = SourceOrigin.tag(incoming, kind, originKey)
+        return (Prefs.getChannels(ctx) + tagged)
             .filterNot { removed.contains(it.identity) }
             .distinctBy { it.identity }
     }
@@ -300,7 +348,7 @@ class LibraryFragment : Fragment() {
                         if (chans.isEmpty()) {
                             Toast.makeText(ctx, "导入失败：未识别到有效频道", Toast.LENGTH_LONG).show()
                         } else {
-                            val merged = mergeChannels(ctx, chans)
+                            val merged = mergeChannels(ctx, chans, Channel.ORIGIN_LIVE, url)
                             Prefs.saveChannels(ctx, merged)
                             reload()
                             Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
@@ -330,7 +378,7 @@ class LibraryFragment : Fragment() {
             try {
                 val chans = SourceCollector(ctx).parseImported(text, "手动导入")
                 if (chans.isEmpty()) { Toast.makeText(ctx, "未识别到有效频道", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
-                val merged = mergeChannels(ctx, chans)
+                val merged = mergeChannels(ctx, chans, Channel.ORIGIN_LIVE, "剪贴板·${System.currentTimeMillis()}")
                 Prefs.saveChannels(ctx, merged)
                 reload()
                 dlg.dismiss()
@@ -401,7 +449,10 @@ class LibraryFragment : Fragment() {
                     if (result.channels.isEmpty()) {
                         Toast.makeText(ctx, "导入失败：未展开出可播放频道\n请检查配置地址是否有效", Toast.LENGTH_LONG).show()
                     } else {
-                        val merged = mergeChannels(ctx, result.channels)
+                        val merged = mergeChannels(
+                            ctx, result.channels, Channel.ORIGIN_TVBOX,
+                            url ?: "TVBox粘贴·${System.currentTimeMillis()}"
+                        )
                         Prefs.saveChannels(ctx, merged)
                         reload()
                         Toast.makeText(
@@ -435,7 +486,7 @@ class LibraryFragment : Fragment() {
                         if (chans.isEmpty()) {
                             Toast.makeText(ctx, "未识别到有效频道", Toast.LENGTH_SHORT).show()
                         } else {
-                            val merged = mergeChannels(ctx, chans)
+                            val merged = mergeChannels(ctx, chans, Channel.ORIGIN_LIVE, "文件·${uri.lastPathSegment ?: System.currentTimeMillis()}")
                             Prefs.saveChannels(ctx, merged)
                             reload()
                             Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()

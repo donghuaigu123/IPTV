@@ -27,6 +27,7 @@ class ChannelAdapter(
     inner class VH(v: View) : RecyclerView.ViewHolder(v) {
         val name: TextView = v.findViewById(R.id.tvName)
         val group: TextView = v.findViewById(R.id.tvGroup)
+        val origin: TextView = v.findViewById(R.id.tvOrigin)
         val url: TextView = v.findViewById(R.id.tvUrl)
         val status: TextView = v.findViewById(R.id.tvStatus)
         val play: ImageButton = v.findViewById(R.id.btnPlay)
@@ -47,6 +48,11 @@ class ChannelAdapter(
             if (ch.speedKBps > 0) append(" · ${ch.speedKBps}KB/s")
         }
         holder.url.text = ch.url
+        // 来源标签：网络采集源 / 网络直播源 / TVBox源（多订阅带 ①②③ 后缀）
+        val originText = ch.originLabel.ifBlank { com.iptv.app.core.SourceOrigin.kindName(ch.originKind) }
+        holder.origin.text = originText
+        holder.origin.visibility = if (originText.isBlank() || originText == com.iptv.app.model.Channel.ORIGIN_NONE)
+            View.GONE else View.VISIBLE
         val ctx = holder.itemView.context
         // 状态徽章
         val (statusText, statusColor, statusBg) = when (ch.status) {

@@ -11,6 +11,11 @@ data class Channel(
     val tvgId: String = "",
     val rawLine: String = "",
     val userAgent: String = "",
+    /** 来源大类：网络采集源 / 网络直播源 / TVBox源 */
+    val originKind: String = "",
+    /** 来源实例标识：区分同一来源类型下的多个订阅（如多个 TVBox 配置） */
+    val originKey: String = "",
+    val originLabel: String = "",
     var status: Int = STATUS_UNKNOWN,
     var latencyMs: Long = 0,
     var speedKBps: Long = 0,
@@ -21,6 +26,13 @@ data class Channel(
         const val STATUS_UNKNOWN = 0
         const val STATUS_OK = 1
         const val STATUS_FAIL = 2
+
+        // 来源大类
+        const val ORIGIN_COLLECT = "collect"   // 网络采集源（采集页抓取）
+        const val ORIGIN_LIVE = "live"         // 网络直播源（直播源导入）
+        const val ORIGIN_TVBOX = "tvbox"       // TVBox 源（TVBox 导入）
+
+        const val ORIGIN_NONE = "其他"
     }
 
     val isOk get() = status == STATUS_OK

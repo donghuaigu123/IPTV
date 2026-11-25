@@ -89,4 +89,6 @@
     <string name="recycle_clear">清空回收站</string>
     <string name="recycle_restored">已恢复 %1$d 个频道</string>
     <string name="recycle_clear_confirm">确定清空回收站吗？这些频道将无法恢复。</string>
+    <!-- v1.8 新增：分来源显示 -->
+    <string name="all_sources">全部来源</string>
 </resources>
