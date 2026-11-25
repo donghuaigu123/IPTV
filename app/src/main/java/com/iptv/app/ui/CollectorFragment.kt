@@ -167,14 +167,17 @@ class CollectorFragment : Fragment() {
                 val c = SourceCollector(ctx)
                 collector = c
                 val channels = c.collect(sources) { p -> updateProgress(p) }
-                Prefs.saveChannels(ctx, channels)
+                // 过滤用户已主动删除的频道，避免采集后又被加回
+                val removed = Prefs.getRemovedKeys(ctx)
+                val kept = channels.filterNot { removed.contains(it.identity) }
+                Prefs.saveChannels(ctx, kept)
                 updateSummary()
 
-                if (Prefs.getBool(ctx, Prefs.KEY_AUTO_CHECK, true) && channels.isNotEmpty()) {
+                if (Prefs.getBool(ctx, Prefs.KEY_AUTO_CHECK, true) && kept.isNotEmpty()) {
                     // 在同一协程里直接执行检测，避免 startCheck() 内部 job?.cancel() 取消自身导致协程异常
                     doCheck(ctx)
                 } else {
-                    safeToast(ctx, "采集完成：${channels.size} 个频道")
+                    safeToast(ctx, "采集完成：${kept.size} 个频道（已排除 ${channels.size - kept.size} 个删除项）")
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 用户主动取消，正常退出

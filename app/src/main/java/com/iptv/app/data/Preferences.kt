@@ -51,6 +51,18 @@ object Prefs {
         ctx(c).edit().putString("channels", gson.toJson(list)).apply()
     }
 
+    // ---------------- 已删除频道回收站 ----------------
+    /** 保存用户主动删除的频道（含完整信息，便于回收站原样恢复） */
+    fun getRecycleBin(c: Context): MutableList<Channel> =
+        ctx(c).getJson("recycle_bin", mutableListOf<Channel>()).toMutableList()
+
+    fun saveRecycleBin(c: Context, list: List<Channel>) {
+        ctx(c).edit().putString("recycle_bin", gson.toJson(list)).apply()
+    }
+
+    /** 用户删除的频道唯一键（name+url），采集/导入时据此过滤，避免删了又被加回 */
+    fun getRemovedKeys(c: Context): Set<String> = getRecycleBin(c).map { it.identity }.toSet()
+
     fun getFavorites(c: Context): MutableSet<String> =
         ctx(c).getStringSet("favorites", emptySet())!!.toMutableSet()
 

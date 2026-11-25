@@ -24,6 +24,8 @@ data class Channel(
     }
 
     val isOk get() = status == STATUS_OK
+    /** 频道唯一标识：名称+地址，用于删除/收藏/去重的稳定判断 */
+    val identity get() = "$name\u0000$url"
 }
 
 /** 内置 / 用户自定义的订阅源 */

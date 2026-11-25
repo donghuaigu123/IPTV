@@ -23,6 +23,15 @@
         android:orientation="horizontal"
         android:padding="12dp">
 
+        <!-- 保留勾选框（仅管理模式显示） -->
+        <CheckBox
+            android:id="@+id/cbKeep"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="4dp"
+            android:buttonTint="@color/accent"
+            android:visibility="gone" />
+
         <!-- 台标占位 -->
         <FrameLayout
             android:layout_width="46dp"
@@ -100,11 +109,22 @@
         </LinearLayout>
 
         <ImageButton
+            android:id="@+id/btnDelete"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/delete"
+            android:src="@drawable/ic_delete"
+            app:tint="@color/error" />
+
+        <ImageButton
             android:id="@+id/btnPlay"
             android:layout_width="44dp"
             android:layout_height="44dp"
-            android:layout_marginStart="8dp"
+            android:layout_marginStart="4dp"
             android:background="@drawable/bg_card_soft"
+            android:contentDescription="@string/play"
             android:src="@drawable/ic_play"
             app:tint="@color/accent" />
     </LinearLayout>

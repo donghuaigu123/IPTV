@@ -15,10 +15,14 @@ import com.iptv.app.model.SourceConfig
 class ChannelAdapter(
     private val items: MutableList<Channel>,
     private val onPlay: (Channel) -> Unit,
-    private val onLongClick: (Channel) -> Unit = {}
+    private val onLongClick: (Channel) -> Unit = {},
+    private val onDelete: (Channel) -> Unit = {}
 ) : RecyclerView.Adapter<ChannelAdapter.VH>() {
 
     var darkTheme = false
+    /** 管理模式：显示勾选框、隐藏播放/删除按钮，点击条目切换勾选 */
+    private var manageMode = false
+    private val selected = mutableSetOf<String>()
 
     inner class VH(v: View) : RecyclerView.ViewHolder(v) {
         val name: TextView = v.findViewById(R.id.tvName)
@@ -26,6 +30,8 @@ class ChannelAdapter(
         val url: TextView = v.findViewById(R.id.tvUrl)
         val status: TextView = v.findViewById(R.id.tvStatus)
         val play: ImageButton = v.findViewById(R.id.btnPlay)
+        val del: ImageButton = v.findViewById(R.id.btnDelete)
+        val keep: CheckBox = v.findViewById(R.id.cbKeep)
         val logoText: TextView? = v.findViewById(R.id.tvLogoText)
     }
 
@@ -62,15 +68,76 @@ class ChannelAdapter(
             holder.name.setTextColor(white)
             holder.url.setTextColor(white)
         }
-        holder.play.setOnClickListener { onPlay(ch) }
-        holder.itemView.setOnClickListener { onPlay(ch) }
-        holder.itemView.setOnLongClickListener { onLongClick(ch); true }
+        // 管理模式：显示勾选框，隐藏播放/删除按钮；普通模式反之
+        holder.keep.visibility = if (manageMode) View.VISIBLE else View.GONE
+        holder.play.visibility = if (manageMode) View.GONE else View.VISIBLE
+        holder.del.visibility = if (manageMode) View.GONE else View.VISIBLE
+        holder.keep.setOnCheckedChangeListener(null)
+        holder.keep.isChecked = selected.contains(ch.identity)
+        holder.keep.setOnCheckedChangeListener { _, checked ->
+            val pos = holder.bindingAdapterPosition
+            if (pos != RecyclerView.NO_POSITION && pos < items.size) {
+                val key = items[pos].identity
+                if (checked) selected.add(key) else selected.remove(key)
+            }
+        }
+        holder.play.setOnClickListener {
+            val pos = holder.bindingAdapterPosition
+            if (pos != RecyclerView.NO_POSITION && pos < items.size) onPlay(items[pos])
+        }
+        holder.del.setOnClickListener {
+            val pos = holder.bindingAdapterPosition
+            if (pos != RecyclerView.NO_POSITION && pos < items.size) onDelete(items[pos])
+        }
+        holder.itemView.setOnClickListener {
+            val pos = holder.bindingAdapterPosition
+            if (pos == RecyclerView.NO_POSITION || pos >= items.size) return@setOnClickListener
+            if (manageMode) {
+                holder.keep.isChecked = !holder.keep.isChecked
+            } else {
+                onPlay(items[pos])
+            }
+        }
+        holder.itemView.setOnLongClickListener {
+            val pos = holder.bindingAdapterPosition
+            if (pos != RecyclerView.NO_POSITION && pos < items.size) onLongClick(items[pos])
+            true
+        }
     }
 
     override fun getItemCount() = items.size
 
     fun submit(list: List<Channel>) {
-        items.clear(); items.addAll(list); notifyDataSetChanged()
+        items.clear(); items.addAll(list)
+        // 清除已不在列表中的勾选，避免残留
+        val valid = list.map { it.identity }.toSet()
+        selected.retainAll(valid)
+        notifyDataSetChanged()
+    }
+
+    fun setManageMode(on: Boolean) {
+        manageMode = on
+        if (!on) selected.clear()
+        notifyDataSetChanged()
+    }
+
+    fun selectedCount() = selected.size
+
+    fun selectedOnes(): List<Channel> = items.filter { selected.contains(it.identity) }
+
+    fun unselectedOnes(): List<Channel> = items.filter { !selected.contains(it.identity) }
+
+    fun selectAll() {
+        selected.addAll(items.map { it.identity }); notifyDataSetChanged()
+    }
+
+    fun selectNone() {
+        selected.clear(); notifyDataSetChanged()
+    }
+
+    fun invertSelection() {
+        val next = items.map { it.identity }.filter { !selected.contains(it) }.toSet()
+        selected.clear(); selected.addAll(next); notifyDataSetChanged()
     }
 }
 

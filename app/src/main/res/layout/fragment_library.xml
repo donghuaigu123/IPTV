@@ -20,9 +20,32 @@
             android:paddingTop="16dp"
             android:paddingBottom="10dp">
 
-            <TextView style="@style/TextSection"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="@string/tab_library" android:textSize="20sp" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView style="@style/TextSection"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:text="@string/tab_library" android:textSize="20sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnRecycle"
+                    style="@style/BtnText"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:minHeight="36dp" android:insetTop="0dp" android:insetBottom="0dp"
+                    android:text="@string/recycle_bin"
+                    app:icon="@drawable/ic_delete" app:iconTint="@color/text_secondary" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnManage"
+                    style="@style/BtnOutline"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:minHeight="36dp" android:insetTop="0dp" android:insetBottom="0dp"
+                    android:text="@string/manage" />
+            </LinearLayout>
 
             <!-- 一键导入区：直播源 / TVBox 双入口，同款主按钮样式 -->
             <LinearLayout
@@ -88,6 +111,47 @@
                     android:layout_height="wrap_content"
                     app:singleLine="true" />
             </HorizontalScrollView>
+
+            <!-- 管理模式操作栏 -->
+            <LinearLayout
+                android:id="@+id/manageBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_card_soft"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="8dp"
+                android:visibility="gone">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSelectAll"
+                    style="@style/BtnText"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:minHeight="36dp" android:insetTop="0dp" android:insetBottom="0dp"
+                    android:text="@string/select_all" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnInvert"
+                    style="@style/BtnText"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:minHeight="36dp" android:insetTop="0dp" android:insetBottom="0dp"
+                    android:text="@string/invert" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnKeepSelected"
+                    style="@style/BtnText"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:minHeight="36dp" android:insetTop="0dp" android:insetBottom="0dp"
+                    android:text="@string/keep_selected" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDeleteSelected"
+                    style="@style/BtnText"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:minHeight="36dp" android:insetTop="0dp" android:insetBottom="0dp"
+                    android:text="@string/delete_selected" android:textColor="@color/error" />
+            </LinearLayout>
         </LinearLayout>
 
         <FrameLayout

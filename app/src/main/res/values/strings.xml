@@ -72,4 +72,21 @@
     <string name="import_tvbox_from_paste">从配置 JSON 导入</string>
     <string name="tvbox_imported">TVBox 导入完成：%1$d 个频道（展开 %2$d 路订阅）</string>
     <string name="export_valid_hint">仅导出检测有效的直播源，兼容各类播放器</string>
+    <!-- v1.7 新增：频道保留 / 删除 / 回收站 -->
+    <string name="manage">管理</string>
+    <string name="done">完成</string>
+    <string name="recycle_bin">回收站</string>
+    <string name="select_all">全选</string>
+    <string name="invert">反选</string>
+    <string name="keep_selected">只保留所选</string>
+    <string name="delete_selected">删除所选</string>
+    <string name="delete_channel_title">删除频道</string>
+    <string name="delete_channel_msg">确定删除「%1$s」吗？删除后可在回收站恢复。</string>
+    <string name="delete_done">已删除 %1$d 个频道（可在回收站恢复）</string>
+    <string name="keep_done">已保留 %1$d 个频道，删除 %2$d 个</string>
+    <string name="recycle_empty">回收站是空的</string>
+    <string name="recycle_restore_all">全部恢复</string>
+    <string name="recycle_clear">清空回收站</string>
+    <string name="recycle_restored">已恢复 %1$d 个频道</string>
+    <string name="recycle_clear_confirm">确定清空回收站吗？这些频道将无法恢复。</string>
 </resources>
