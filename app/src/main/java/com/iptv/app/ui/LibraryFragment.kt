@@ -23,12 +23,15 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import com.iptv.app.R
+import com.iptv.app.core.ChannelMerger
 import com.iptv.app.core.SourceCollector
 import com.iptv.app.core.SourceOrigin
 import com.iptv.app.core.TvBoxImporter
 import com.iptv.app.data.PlaylistBus
 import com.iptv.app.data.Prefs
 import com.iptv.app.model.Channel
+import com.iptv.app.model.ChannelGroup
+import com.iptv.app.model.lineStatusText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -42,10 +45,12 @@ class LibraryFragment : Fragment() {
     private lateinit var recycler: RecyclerView
     private lateinit var chipGroups: ChipGroup
     private lateinit var chipOrigins: ChipGroup
-    private lateinit var adapter: ChannelAdapter
+    private lateinit var adapter: ChannelGroupAdapter
     private lateinit var emptyState: View
     private var allChannels: List<Channel> = emptyList()
-    private var visibleChannels: List<Channel> = emptyList()
+    /** 合并后的频道组（同一来源下同名频道聚合为多线路） */
+    private var allGroups: List<ChannelGroup> = emptyList()
+    private var visibleGroups: List<ChannelGroup> = emptyList()
     private var currentGroup = "全部"
     private var currentOrigin = "all"   // all 或 SourceOrigin.OriginGroup.id
     private var manageMode = false
@@ -58,14 +63,14 @@ class LibraryFragment : Fragment() {
         chipOrigins = v.findViewById(R.id.chipOrigins)
         emptyState = v.findViewById(R.id.emptyState)
 
-        adapter = ChannelAdapter(
+        adapter = ChannelGroupAdapter(
             mutableListOf(),
-            onPlay = { ch ->
-                val idx = visibleChannels.indexOfFirst { it.identity == ch.identity }
-                openPlayer(visibleChannels, if (idx >= 0) idx else 0)
+            onPlay = { g ->
+                val idx = visibleGroups.indexOfFirst { it.key == g.key }
+                openPlayerGroup(visibleGroups, if (idx >= 0) idx else 0)
             },
-            onLongClick = { ch -> showChannelMenu(ch) },
-            onDelete = { ch -> confirmDelete(ch) }
+            onLongClick = { g -> showChannelMenu(g) },
+            onDelete = { g -> confirmDelete(g) }
         )
         recycler.layoutManager = LinearLayoutManager(requireContext())
         recycler.adapter = adapter
@@ -80,7 +85,7 @@ class LibraryFragment : Fragment() {
         v.findViewById<MaterialButton>(R.id.btnImportTvbox).setOnClickListener { showTvBoxImportDialog() }
         v.findViewById<View>(R.id.fabPlayAll).setOnClickListener {
             if (manageMode) { toggleManageMode(v); return@setOnClickListener }
-            if (visibleChannels.isNotEmpty()) openPlayer(visibleChannels, 0)
+            if (visibleGroups.isNotEmpty()) openPlayerGroup(visibleGroups, 0)
             else Toast.makeText(requireContext(), "当前筛选下暂无频道", Toast.LENGTH_SHORT).show()
         }
 
@@ -107,15 +112,26 @@ class LibraryFragment : Fragment() {
 
     private fun reload() {
         allChannels = Prefs.getChannels(requireContext())
+        allGroups = ChannelMerger.merge(allChannels)
         buildOriginChips()
         buildChips()
         filter()
     }
 
-    /** 按来源大类 + 订阅实例生成 chip，可自由切换；同一大类多订阅带 ①②③ 后缀 */
+    /** 按来源大类 + 订阅实例生成 chip，可自由切换；计数以合并后的频道组为单位 */
     private fun buildOriginChips() {
         chipOrigins.removeAllViews()
-        val groups = SourceOrigin.groups(allChannels)
+        val groups = allGroups.groupBy { "${it.originKind}|${it.originKey.ifBlank { it.originKind }}" }
+            .map { (id, list) ->
+                val first = list.first()
+                SourceOrigin.OriginGroup(
+                    kind = first.originKind,
+                    key = first.originKey.ifBlank { first.originKind },
+                    label = first.originLabel.ifBlank { SourceOrigin.kindName(first.originKind) },
+                    count = list.size
+                )
+            }
+            .sortedWith(compareBy({ SourceOrigin.kindOrder(it.kind) }, { it.label }))
         // 若当前选中的来源已不存在，回退到全部
         if (currentOrigin != "all" && groups.none { it.id == currentOrigin }) currentOrigin = "all"
 
@@ -140,10 +156,10 @@ class LibraryFragment : Fragment() {
 
     private fun buildChips() {
         chipGroups.removeAllViews()
-        // 分组只统计当前来源下的频道，切换来源后分组随之更新
-        val scoped = if (currentOrigin == "all") allChannels
-        else allChannels.filter { "${it.originKind}|${it.originKey.ifBlank { it.originKind }}" == currentOrigin }
-        val groups = listOf("全部") + scoped.map { it.group }.distinct().sorted().take(15)
+        // 分组只统计当前来源下的频道组，切换来源后分组随之更新
+        val scoped = if (currentOrigin == "all") allGroups
+        else allGroups.filter { "${it.originKind}|${it.originKey.ifBlank { it.originKind }}" == currentOrigin }
+        val groups = listOf("全部") + scoped.map { it.group }.filter { it.isNotBlank() }.distinct().sorted().take(15)
         if (groups.none { it == currentGroup }) currentGroup = "全部"
         groups.forEach { g ->
             val chip = Chip(requireContext()).apply {
@@ -158,41 +174,58 @@ class LibraryFragment : Fragment() {
 
     private fun filter() {
         val q = etSearch.text.toString().trim()
-        val list = allChannels.filter { ch ->
+        val list = allGroups.filter { g ->
             (currentOrigin == "all" ||
-                "${ch.originKind}|${ch.originKey.ifBlank { ch.originKind }}" == currentOrigin) &&
-            (currentGroup == "全部" || ch.group == currentGroup) &&
-            (q.isBlank() || ch.name.contains(q, true) || ch.url.contains(q, true))
+                "${g.originKind}|${g.originKey.ifBlank { g.originKind }}" == currentOrigin) &&
+            (currentGroup == "全部" || g.group == currentGroup) &&
+            (q.isBlank() || g.name.contains(q, true) || g.best?.url?.contains(q, true) == true)
         }
-        visibleChannels = list
+        visibleGroups = list
         adapter.submit(list)
-        emptyState.visibility = if (allChannels.isEmpty()) View.VISIBLE else View.GONE
+        emptyState.visibility = if (allGroups.isEmpty()) View.VISIBLE else View.GONE
     }
 
-    private fun showChannelMenu(ch: Channel) {
+    private fun showChannelMenu(g: ChannelGroup) {
         val ctx = requireContext()
+        val best = g.best
         val favs = Prefs.getFavorites(ctx)
-        val isFav = favs.contains(ch.url)
+        val isFav = favs.contains(g.name)
+        val items = mutableListOf("播放", if (isFav) "取消收藏" else "收藏")
+        if (g.lineCount > 1) items += "选择线路（${g.lineCount}条）"
+        items += listOf("复制地址", "在外部播放器打开", "删除此频道")
         AlertDialog.Builder(ctx)
-            .setTitle(ch.name)
-            .setItems(
-                arrayOf("播放", if (isFav) "取消收藏" else "收藏", "复制地址", "在外部播放器打开", "删除此频道")
-            ) { _, i ->
+            .setTitle(if (g.lineCount > 1) "${g.name}（${g.lineCount}条线路）" else g.name)
+            .setItems(items.toTypedArray()) { _, i ->
                 when (i) {
-                    0 -> openPlayer(listOf(ch), 0)
+                    0 -> openPlayerGroup(listOf(g), 0)
                     1 -> {
-                        if (isFav) favs.remove(ch.url) else favs.add(ch.url)
+                        if (isFav) favs.remove(g.name) else favs.add(g.name)
                         Prefs.saveFavorites(ctx, favs)
                     }
-                    2 -> copyText(ch.url)
-                    3 -> {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(ch.url))
-                        intent.setDataAndType(Uri.parse(ch.url), "video/*")
+                    2 -> if (g.lineCount > 1) showLinePicker(g)
+                    3 -> best?.let { copyText(it.url) }
+                    4 -> best?.let {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(it.url))
+                        intent.setDataAndType(Uri.parse(it.url), "video/*")
                         try { startActivity(intent) } catch (e: Exception) { Toast.makeText(ctx, "没有可用的外部播放器", Toast.LENGTH_SHORT).show() }
                     }
-                    4 -> confirmDelete(ch)
+                    5 -> confirmDelete(g)
                 }
             }.show()
+    }
+
+    /** 频道菜单里的「选择线路」：列出该频道所有线路，选中后从该线路开始播放 */
+    private fun showLinePicker(g: ChannelGroup) {
+        val ctx = requireContext()
+        val labels = g.channels.mapIndexed { idx, c ->
+            "线路${idx + 1} · ${c.lineStatusText()} · ${c.group.ifBlank { c.source }}"
+        }.toTypedArray()
+        AlertDialog.Builder(ctx).setTitle("${g.name} · 选择线路")
+            .setItems(labels) { _, which ->
+                val startLine = which.coerceIn(0, g.channels.lastIndex)
+                openPlayerGroup(listOf(g), 0, startLine)
+            }
+            .setNegativeButton(R.string.cancel, null).show()
     }
 
     // ---------------- 保留 / 删除 / 回收站 ----------------
@@ -206,15 +239,23 @@ class LibraryFragment : Fragment() {
         v.findViewById<View>(R.id.fabPlayAll).visibility = if (manageMode) View.GONE else View.VISIBLE
     }
 
-    /** 单个频道删除：二次确认后移入回收站 */
-    private fun confirmDelete(ch: Channel) {
+    /** 单个频道（整组所有线路）删除：二次确认后移入回收站 */
+    private fun confirmDelete(g: ChannelGroup) {
         val ctx = requireContext()
+        val msg = if (g.lineCount > 1)
+            "确定删除「${g.name}」及其 ${g.lineCount} 条线路吗？可在回收站恢复。"
+            else getString(R.string.delete_channel_msg, g.name)
         AlertDialog.Builder(ctx)
             .setTitle(R.string.delete_channel_title)
-            .setMessage(getString(R.string.delete_channel_msg, ch.name))
-            .setPositiveButton(R.string.delete) { _, _ -> deleteChannels(listOf(ch)) }
+            .setMessage(msg)
+            .setPositiveButton(R.string.delete) { _, _ -> deleteGroups(listOf(g)) }
             .setNegativeButton(R.string.cancel, null)
             .show()
+    }
+
+    /** 把频道组展开为所有线路后删除 */
+    private fun deleteGroups(groups: List<ChannelGroup>, showToast: Boolean = true) {
+        deleteChannels(groups.flatMap { it.channels }, showToast)
     }
 
     /** 把频道从列表移除并存入回收站（持久化，采集/导入不会再加回） */
@@ -233,31 +274,31 @@ class LibraryFragment : Fragment() {
 
     /** 批量：只保留勾选的频道，其余移入回收站 */
     private fun keepSelected() {
-        val keep = adapter.selectedOnes()
+        val keep = adapter.selectedGroups()
         if (keep.isEmpty()) {
             Toast.makeText(requireContext(), "请先勾选要保留的频道", Toast.LENGTH_SHORT).show()
             return
         }
-        val remove = adapter.unselectedOnes()
+        val remove = adapter.unselectedGroups()
         if (remove.isEmpty()) {
             Toast.makeText(requireContext(), "当前已全部勾选", Toast.LENGTH_SHORT).show()
             return
         }
-        deleteChannels(remove, showToast = false)
+        deleteGroups(remove, showToast = false)
         Toast.makeText(requireContext(), getString(R.string.keep_done, keep.size, remove.size), Toast.LENGTH_SHORT).show()
     }
 
-    /** 批量：删除勾选的频道 */
+    /** 批量：删除勾选的频道（整组） */
     private fun deleteSelected() {
-        val selected = adapter.selectedOnes()
-        if (selected.isEmpty()) {
+        val selectedGroups = adapter.selectedGroups()
+        if (selectedGroups.isEmpty()) {
             Toast.makeText(requireContext(), "请先勾选要删除的频道", Toast.LENGTH_SHORT).show()
             return
         }
         AlertDialog.Builder(requireContext())
             .setTitle(R.string.delete_channel_title)
-            .setMessage("确定删除选中的 ${selected.size} 个频道吗？可在回收站恢复。")
-            .setPositiveButton(R.string.delete) { _, _ -> deleteChannels(selected) }
+            .setMessage("确定删除选中的 ${selectedGroups.size} 个频道吗？可在回收站恢复。")
+            .setPositiveButton(R.string.delete) { _, _ -> deleteGroups(selectedGroups) }
             .setNegativeButton(R.string.cancel, null)
             .show()
     }
@@ -506,16 +547,22 @@ class LibraryFragment : Fragment() {
         client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string() else null }
     } catch (e: Exception) { null }
 
-    private fun openPlayer(channels: List<Channel>, index: Int) {
-        if (channels.isEmpty()) {
+    /**
+     * 以频道组为单位打开播放器。
+     * @param groups 可见频道组列表（用于上一台/下一台）
+     * @param groupIndex 起始频道组下标
+     * @param startLine 起始线路下标，默认 0（最佳线路）
+     */
+    private fun openPlayerGroup(groups: List<ChannelGroup>, groupIndex: Int, startLine: Int = 0) {
+        if (groups.isEmpty()) {
             Toast.makeText(requireContext(), "暂无可播放的频道", Toast.LENGTH_SHORT).show()
             return
         }
         // 通过进程内总线传递，避免超长 JSON 撑爆 Intent Binder 事务（TransactionTooLargeException）
-        val safeIndex = index.coerceIn(0, channels.size - 1)
-        PlaylistBus.set(channels)
+        val safeIndex = groupIndex.coerceIn(0, groups.size - 1)
+        val safeLine = startLine.coerceIn(0, (groups[safeIndex].channels.lastIndex).coerceAtLeast(0))
+        PlaylistBus.setGroups(groups, safeIndex, safeLine)
         val intent = Intent(requireContext(), PlayerActivity::class.java)
-        intent.putExtra("index", safeIndex)
         try {
             startActivity(intent)
         } catch (e: Exception) {

@@ -4,13 +4,11 @@ import android.annotation.SuppressLint
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.pm.ActivityInfo
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -43,10 +41,13 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.iptv.app.R
+import com.iptv.app.core.ChannelMerger
 import com.iptv.app.core.SourceCollector
 import com.iptv.app.data.PlaylistBus
 import com.iptv.app.data.Prefs
 import com.iptv.app.model.Channel
+import com.iptv.app.model.ChannelGroup
+import com.iptv.app.model.lineStatusText
 import kotlin.math.abs
 
 @SuppressLint("UnsafeOptInUsageError")
@@ -57,17 +58,24 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var trackSelector: DefaultTrackSelector
     private lateinit var dataSourceFactory: DefaultHttpDataSource.Factory
     private lateinit var drawer: DrawerLayout
-    private lateinit var adapter: ChannelAdapter
+    private lateinit var adapter: ChannelGroupAdapter
     private lateinit var tvTitle: TextView
     private lateinit var tvTime: TextView
     private lateinit var tvCenterHint: TextView
+    private lateinit var tvLineBadge: TextView
     private lateinit var topBar: LinearLayout
     private lateinit var bottomBar: LinearLayout
     private lateinit var seekBar: SeekBar
     private lateinit var btnPlayPause: ImageButton
 
-    private var channels: List<Channel> = emptyList()
-    private var currentIndex = 0
+    /** 频道组列表（合并后的频道，每组含 N 条线路） */
+    private var groups: List<ChannelGroup> = emptyList()
+    private var currentGroupIndex = 0
+    private var currentLineIndex = 0
+    /** 当前频道组内已尝试过的线路下标，避免自动切换死循环 */
+    private val triedLines = mutableSetOf<Int>()
+    private var switchingGuard = false
+
     private val handler = Handler(Looper.getMainLooper())
     private var controlsVisible = true
     private var locked = false
@@ -89,24 +97,42 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    /** 单条线路长时间无响应的兜底切换任务，切换线路前都会取消上一条的计时 */
+    private val switchTimeoutTask = Runnable {
+        if (switchingGuard && !playerReleased && !isFinishing && !isDestroyed) autoSwitchLine()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_player)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // 优先从进程内总线取列表（避免 Intent 传超长 JSON 导致 TransactionTooLargeException）；
-        // 总线为空时（如进程被回收后重建）回退到本地缓存。
-        channels = PlaylistBus.get().ifEmpty { Prefs.getChannels(this) }
-        if (channels.isEmpty()) {
+        // 优先取进程内总线里的「频道组」播放上下文（多线路），避免 Intent 传超长 JSON。
+        if (PlaylistBus.groups.isNotEmpty()) {
+            groups = PlaylistBus.groups
+            currentGroupIndex = PlaylistBus.groupIndex
+            currentLineIndex = PlaylistBus.startLine
+        } else {
+            // 进程回收后重建等场景：回退为从扁平频道列表即时合并。
+            val flat = PlaylistBus.get().ifEmpty { Prefs.getChannels(this) }
+            groups = ChannelMerger.merge(flat)
+            currentGroupIndex = intent.getIntExtra("index", 0)
+            currentLineIndex = 0
+        }
+        if (groups.isEmpty()) {
             // 兼容旧版本可能通过 Intent 传 JSON 的情况
             val json = intent.getStringExtra("channels")
             if (!json.isNullOrBlank()) {
-                channels = try {
-                    Gson().fromJson(json, object : TypeToken<List<Channel>>() {}.type) ?: emptyList()
+                val flat: List<Channel> = try {
+                    Gson().fromJson<List<Channel>>(json, object : TypeToken<List<Channel>>() {}.type) ?: emptyList()
                 } catch (e: Exception) { emptyList() }
+                groups = ChannelMerger.merge(flat)
             }
         }
-        currentIndex = intent.getIntExtra("index", 0).coerceIn(0, (channels.size - 1).coerceAtLeast(0))
+        currentGroupIndex = currentGroupIndex.coerceIn(0, (groups.size - 1).coerceAtLeast(0))
+        if (groups.isNotEmpty()) {
+            currentLineIndex = currentLineIndex.coerceIn(0, groups[currentGroupIndex].channels.lastIndex.coerceAtLeast(0))
+        }
 
         findViews()
         setupDrawer()
@@ -119,7 +145,7 @@ class PlayerActivity : AppCompatActivity() {
         }
         setupControls()
         setupGestures()
-        playCurrent()
+        playCurrentLine()
 
         handler.post(updateTask)
     }
@@ -130,6 +156,7 @@ class PlayerActivity : AppCompatActivity() {
         tvTitle = findViewById(R.id.tvTitle)
         tvTime = findViewById(R.id.tvTime)
         tvCenterHint = findViewById(R.id.tvCenterHint)
+        tvLineBadge = findViewById(R.id.tvLineBadge)
         topBar = findViewById(R.id.topBar)
         bottomBar = findViewById(R.id.bottomBar)
         seekBar = findViewById(R.id.seekBar)
@@ -138,12 +165,13 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun setupDrawer() {
         val recycler = findViewById<RecyclerView>(R.id.recyclerDrawer)
-        adapter = ChannelAdapter(channels.toMutableList(), onPlay = { ch ->
-            currentIndex = channels.indexOfFirst { it.url == ch.url && it.name == ch.name }.coerceAtLeast(0)
-            playCurrent()
+        adapter = ChannelGroupAdapter(groups.toMutableList(), onPlay = { g ->
+            val idx = groups.indexOfFirst { it.key == g.key }
+            if (idx >= 0) switchToGroup(idx)
             drawer.closeDrawers()
         })
         adapter.darkTheme = true
+        adapter.showDelete = false
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
 
@@ -151,7 +179,7 @@ class PlayerActivity : AppCompatActivity() {
         etSearch.addTextChangedListener(object : android.text.TextWatcher {
             override fun afterTextChanged(s: android.text.Editable?) {
                 val q = s.toString().trim()
-                adapter.submit(if (q.isBlank()) channels else channels.filter { it.name.contains(q, true) })
+                adapter.submit(if (q.isBlank()) groups else groups.filter { it.name.contains(q, true) })
             }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -203,11 +231,8 @@ class PlayerActivity : AppCompatActivity() {
                         if (playerReleased || isFinishing || isDestroyed) return
                         try {
                             when (state) {
-                                Player.STATE_BUFFERING -> tvCenterHint.apply { text = "缓冲中…"; visibility = View.VISIBLE }
-                                Player.STATE_READY -> {
-                                    tvCenterHint.visibility = View.GONE
-                                    updateTime()
-                                }
+                                Player.STATE_BUFFERING -> { if (!switchingGuard) tvCenterHint.apply { text = "缓冲中…"; visibility = View.VISIBLE } }
+                                Player.STATE_READY -> { switchingGuard = false; handler.removeCallbacks(switchTimeoutTask); tvCenterHint.visibility = View.GONE; updateTime() }
                                 Player.STATE_ENDED -> { tvCenterHint.apply { text = "播放结束"; visibility = View.VISIBLE } }
                             }
                             updatePlayButton()
@@ -225,9 +250,8 @@ class PlayerActivity : AppCompatActivity() {
                     }
                     override fun onPlayerError(error: PlaybackException) {
                         if (playerReleased || isFinishing || isDestroyed) return
-                        try {
-                            tvCenterHint.apply { text = "播放失败：${error.message?.take(80)}"; visibility = View.VISIBLE }
-                        } catch (_: Exception) {}
+                        // 线路播放失败：自动切换到本频道的下一条线路
+                        autoSwitchLine()
                     }
                     override fun onVideoSizeChanged(size: VideoSize) {
                         // Media3 自动处理画面比例
@@ -240,21 +264,25 @@ class PlayerActivity : AppCompatActivity() {
         })
     }
 
-    private fun playCurrent() {
-        if (channels.isEmpty()) {
+    /** 播放当前组的当前线路 */
+    private fun playCurrentLine() {
+        val g = groups.getOrNull(currentGroupIndex)
+        if (g == null || g.channels.isEmpty()) {
             Toast.makeText(this, "频道列表为空", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
         if (playerReleased || !::player.isInitialized) return
-        if (currentIndex !in channels.indices) currentIndex = 0
-        val ch = channels[currentIndex]
-        tvTitle.text = "${ch.name}  ·  ${ch.group}"
-        Prefs.putInt(this, Prefs.KEY_LAST_PLAYED, currentIndex)
+        if (currentLineIndex !in g.channels.indices) currentLineIndex = 0
+        triedLines.add(currentLineIndex)
+        val ch = g.channels[currentLineIndex]
+        updateTitle()
+        Prefs.putInt(this, Prefs.KEY_LAST_PLAYED, currentGroupIndex)
 
         val url = ch.url.trim()
         if (!url.contains("://")) {
-            tvCenterHint.apply { text = "无效地址：${url.take(60)}"; visibility = View.VISIBLE }
+            tvCenterHint.apply { text = "线路 ${currentLineIndex + 1} 地址无效，尝试下一条…"; visibility = View.VISIBLE }
+            autoSwitchLine()
             return
         }
         try {
@@ -265,19 +293,82 @@ class PlayerActivity : AppCompatActivity() {
                 .setUri(Uri.parse(url))
                 .setTag(ch)
                 .build()
+            switchingGuard = true
             player.setMediaItem(item)
             player.prepare()
             player.playWhenReady = true
-            tvCenterHint.apply { text = "正在连接：${ch.name}"; visibility = View.VISIBLE }
+            tvCenterHint.apply { text = "正在连接：${g.name} · 线路 ${currentLineIndex + 1}"; visibility = View.VISIBLE }
             updatePlayButton()
+            // 兜底：若 12 秒内既没 READY 也没 error（弱网/无响应），主动切下一条
+            handler.removeCallbacks(switchTimeoutTask)
+            handler.postDelayed(switchTimeoutTask, 12000)
         } catch (e: Exception) {
-            tvCenterHint.apply { text = "播放地址解析失败：${e.message?.take(60)}"; visibility = View.VISIBLE }
+            tvCenterHint.apply { text = "线路 ${currentLineIndex + 1} 解析失败：${e.message?.take(40)}"; visibility = View.VISIBLE }
+            autoSwitchLine()
         }
+    }
+
+    /**
+     * 当前线路失败后自动切换到本频道下一条未尝试过的线路。
+     * 每条线路在本频道内只尝试一次；全部失败后给出提示并停止，避免无限重试。
+     */
+    private fun autoSwitchLine() {
+        if (playerReleased || isFinishing || isDestroyed) return
+        val g = groups.getOrNull(currentGroupIndex) ?: return
+        if (g.channels.size <= 1) {
+            tvCenterHint.apply { text = "播放失败，该频道暂无其他线路"; visibility = View.VISIBLE }
+            return
+        }
+        val next = g.channels.indices.firstOrNull { it !in triedLines }
+        if (next == null) {
+            tvCenterHint.apply { text = "「${g.name}」全部 ${g.lineCount} 条线路均无法播放"; visibility = View.VISIBLE }
+            return
+        }
+        val failedLine = currentLineIndex
+        currentLineIndex = next
+        tvCenterHint.apply { text = "线路 ${failedLine + 1} 播放失败，自动切换线路 ${next + 1} / ${g.lineCount}"; visibility = View.VISIBLE }
+        try { if (::player.isInitialized) player.stop() } catch (_: Exception) {}
+        playCurrentLine()
+    }
+
+    /** 用户手动选择线路 */
+    private fun showLinePicker() {
+        val g = groups.getOrNull(currentGroupIndex) ?: return
+        if (g.lineCount <= 1) {
+            Toast.makeText(this, "该频道只有 1 条线路", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = g.channels.mapIndexed { idx, c ->
+            "线路 ${idx + 1}${if (idx == currentLineIndex) "（当前）" else ""} · ${c.lineStatusText()}${if (c.group.isNotBlank()) " · ${c.group}" else ""}"
+        }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("${g.name} · 选择线路（${g.lineCount}条）")
+            .setItems(labels) { _, which -> switchToLine(which) }
+            .setNegativeButton(R.string.cancel, null).show()
+    }
+
+    private fun switchToLine(index: Int) {
+        val g = groups.getOrNull(currentGroupIndex) ?: return
+        if (index !in g.channels.indices) return
+        triedLines.clear()
+        switchingGuard = false
+        currentLineIndex = index
+        try { if (::player.isInitialized) player.stop() } catch (_: Exception) {}
+        playCurrentLine()
+    }
+
+    private fun updateTitle() {
+        val g = groups.getOrNull(currentGroupIndex) ?: return
+        tvTitle.text = if (g.lineCount > 1)
+            "${g.name}  ·  线路 ${currentLineIndex + 1}/${g.lineCount}"
+        else "${g.name}  ·  ${g.group}"
+        tvLineBadge.text = "线路 ${currentLineIndex + 1}/${g.lineCount}"
+        tvLineBadge.visibility = if (g.lineCount > 1) View.VISIBLE else View.GONE
     }
 
     private fun setupControls() {
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<View>(R.id.btnList).setOnClickListener { drawer.openDrawer(GravityCompat.START) }
+        tvLineBadge.setOnClickListener { showLinePicker() }
         findViewById<View>(R.id.btnLock).setOnClickListener {
             locked = !locked
             topBar.visibility = if (locked) View.GONE else View.VISIBLE
@@ -385,10 +476,21 @@ class PlayerActivity : AppCompatActivity() {
         } catch (_: Exception) {}
     }
 
+    /** 上一台 / 下一台：切换频道组（不是线路），从该频道最佳线路开始播放 */
     private fun switchChannel(delta: Int) {
-        if (channels.isEmpty()) return
-        currentIndex = (currentIndex + delta + channels.size) % channels.size
-        playCurrent()
+        if (groups.isEmpty()) return
+        val next = (currentGroupIndex + delta + groups.size) % groups.size
+        switchToGroup(next)
+    }
+
+    private fun switchToGroup(index: Int) {
+        if (index !in groups.indices) return
+        currentGroupIndex = index
+        currentLineIndex = 0
+        triedLines.clear()
+        switchingGuard = false
+        try { if (::player.isInitialized) player.stop() } catch (_: Exception) {}
+        playCurrentLine()
     }
 
     private fun updateTime() {
@@ -451,7 +553,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun showMoreMenu() {
-        val items = arrayOf("倍速播放", "音轨选择", "字幕选择", "画面比例", "投屏", "复制当前地址", "频道详情")
+        val items = arrayOf("倍速播放", "音轨选择", "字幕选择", "画面比例", "选择线路", "投屏", "复制当前地址", "频道详情")
         AlertDialog.Builder(this)
             .setTitle("播放设置")
             .setItems(items) { _, i ->
@@ -460,9 +562,10 @@ class PlayerActivity : AppCompatActivity() {
                     1 -> showTrackDialog(C.TRACK_TYPE_AUDIO)
                     2 -> showTrackDialog(C.TRACK_TYPE_TEXT)
                     3 -> showRatioDialog()
-                    4 -> Toast.makeText(this, "投屏：请确保同一局域网内有 Chromecast / 智能电视设备", Toast.LENGTH_LONG).show()
-                    5 -> copyCurrentUrl()
-                    6 -> showChannelInfo()
+                    4 -> showLinePicker()
+                    5 -> Toast.makeText(this, "投屏：请确保同一局域网内有 Chromecast / 智能电视设备", Toast.LENGTH_LONG).show()
+                    6 -> copyCurrentUrl()
+                    7 -> showChannelInfo()
                 }
             }.show()
     }
@@ -482,10 +585,10 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun showTrackDialog(type: Int) {
         if (playerReleased || !::player.isInitialized) return
-        val groups = try { player.currentTracks.groups.filter { it.type == type } } catch (_: Exception) { emptyList() }
+        val groupsTrack = try { player.currentTracks.groups.filter { it.type == type } } catch (_: Exception) { emptyList() }
         val labels = mutableListOf<String>("关闭")
         val selections = mutableListOf<Pair<Tracks.Group, Int>?>(null)
-        groups.forEach { group ->
+        groupsTrack.forEach { group ->
             for (i in 0 until group.length) {
                 val format = group.getTrackFormat(i)
                 val label = format.label ?: format.language ?: "轨道"
@@ -529,18 +632,32 @@ class PlayerActivity : AppCompatActivity() {
         }.show()
     }
 
+    private fun currentChannel(): Channel? = groups.getOrNull(currentGroupIndex)?.channels?.getOrNull(currentLineIndex)
+
     private fun copyCurrentUrl() {
-        val ch = channels.getOrNull(currentIndex) ?: return
+        val ch = currentChannel() ?: return
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
         cm.setPrimaryClip(android.content.ClipData.newPlainText("IPTV", ch.url))
-        Toast.makeText(this, "地址已复制", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "当前线路地址已复制", Toast.LENGTH_SHORT).show()
     }
 
     private fun showChannelInfo() {
-        val ch = channels.getOrNull(currentIndex) ?: return
+        val g = groups.getOrNull(currentGroupIndex) ?: return
+        val ch = currentChannel() ?: return
+        val sb = StringBuilder()
+        sb.append("分组：${g.group}\n")
+        sb.append("来源：${g.originLabel}\n")
+        sb.append("线路：${currentLineIndex + 1} / ${g.lineCount}\n")
+        sb.append("当前地址：${ch.url}\n")
+        if (g.lineCount > 1) {
+            sb.append("\n全部线路：\n")
+            g.channels.forEachIndexed { idx, c ->
+                sb.append("${idx + 1}. ${c.lineStatusText()}  ${c.url.take(60)}\n")
+            }
+        }
         AlertDialog.Builder(this)
-            .setTitle(ch.name)
-            .setMessage("分组：${ch.group}\n来源：${ch.source}\n地址：${ch.url}\n状态：${if (ch.isOk) "可用" else "未检测"}")
+            .setTitle(g.name)
+            .setMessage(sb.toString())
             .setPositiveButton(R.string.ok, null).show()
     }
 
@@ -579,6 +696,7 @@ class PlayerActivity : AppCompatActivity() {
     override fun onDestroy() {
         playerReleased = true
         handler.removeCallbacks(updateTask)
+        handler.removeCallbacks(switchTimeoutTask)
         try {
             if (::player.isInitialized) {
                 playerView.player = null

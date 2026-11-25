@@ -57,6 +57,21 @@
                 android:src="@drawable/ic_list"
                 app:tint="#FFFFFF" />
 
+            <!-- 线路入口：显示当前线路 i/n，点击手动选择线路 -->
+            <TextView
+                android:id="@+id/tvLineBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginStart="4dp"
+                android:gravity="center"
+                android:background="@drawable/bg_card_soft"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:text="线路" />
+
             <ImageButton
                 android:id="@+id/btnLock"
                 android:layout_width="44dp"
