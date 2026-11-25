@@ -55,6 +55,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var player: ExoPlayer
     private lateinit var trackSelector: DefaultTrackSelector
+    private lateinit var dataSourceFactory: DefaultHttpDataSource.Factory
     private lateinit var drawer: DrawerLayout
     private lateinit var adapter: ChannelAdapter
     private lateinit var tvTitle: TextView
@@ -160,7 +161,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun setupPlayer() {
         val ctx = this
         val ua = Prefs.getString(ctx, Prefs.KEY_UA, SourceCollector.DEFAULT_UA)
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
+        dataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(ua)
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
@@ -257,6 +258,9 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         try {
+            // TVBox 导入的频道可能带专用 UA（如 okhttp/3.15），必须用该 UA 才能播放
+            val ua = ch.userAgent.ifBlank { Prefs.getString(this, Prefs.KEY_UA, SourceCollector.DEFAULT_UA) }
+            try { dataSourceFactory.setUserAgent(ua) } catch (_: Exception) {}
             val item = MediaItem.Builder()
                 .setUri(Uri.parse(url))
                 .setTag(ch)

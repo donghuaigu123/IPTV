@@ -38,7 +38,7 @@ class ChannelChecker(private val context: Context) {
             async {
                 sem.acquire()
                 try {
-                    val checked = checkOne(ch, client, timeoutSec)
+                    val checked = checkOne(ch, client)
                     done++
                     if (done % 5 == 0 || done == total) {
                         onProgress(CollectProgress("可用性检测", done, total, "${ch.name} · ${if (checked.isOk) "可用" else "不可用"}"))
@@ -54,14 +54,15 @@ class ChannelChecker(private val context: Context) {
         results
     }
 
-    private fun checkOne(ch: Channel, client: OkHttpClient, timeoutSec: Int): Channel {
+    private fun checkOne(ch: Channel, client: OkHttpClient): Channel {
         val t0 = System.currentTimeMillis()
         try {
             val probeBytes = 8192
+            val ua = ch.userAgent.ifBlank { SourceCollector.DEFAULT_UA }
             val request = Request.Builder()
                 .url(ch.url)
                 .header("Range", "bytes=0-$probeBytes")
-                .header("User-Agent", SourceCollector.DEFAULT_UA)
+                .header("User-Agent", ua)
                 .header("Accept", "*/*")
                 .build()
             client.newCall(request).execute().use { resp ->

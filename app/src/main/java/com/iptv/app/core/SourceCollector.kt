@@ -121,13 +121,88 @@ class SourceCollector(private val context: Context) {
 
             return when (src.type) {
                 SourceConfig.TYPE_TXT -> Parsers.parseTxt(body, src.name)
+                SourceConfig.TYPE_TVBOX -> expandTvBoxSync(body, url, src.name, ua)
                 else -> Parsers.parseAny(body, src.name)
             }
         }
     }
 
-    /** 导入用户提供的文本（本地文件或粘贴内容） */
-    fun parseImported(text: String, label: String): List<Channel> = Parsers.parseAny(text, label)
+    /**
+     * 同步展开 TVBox 配置（采集流程在 IO 线程调用）。
+     * 关键：lives[].url 是订阅列表地址，必须二次抓取解析；直接流地址则直接建频道。
+     */
+    private fun expandTvBoxSync(
+        text: String, configUrl: String, label: String, defaultUa: String
+    ): List<Channel> {
+        val lives = TvBoxParser.parseLives(text)
+        if (lives.isEmpty()) return emptyList()
+        val out = mutableListOf<Channel>()
+        lives.forEach { live ->
+            try {
+                val resolved = TvBoxParser.resolveUrl(live.url, configUrl) ?: return@forEach
+                val ua = live.ua.ifBlank { defaultUa }
+                val sample = fetchHead(resolved, ua)
+                when (TvBoxParser.detectContentKind(resolved, sample)) {
+                    TvBoxParser.ContentKind.DIRECT ->
+                        out += Channel(live.name, resolved, live.group.ifBlank { "TVBox" },
+                            logo = live.logo, epg = live.epg, source = "$label·${live.name}",
+                            userAgent = ua)
+                    TvBoxParser.ContentKind.PLAYLIST -> {
+                        val full = if (sample != null && sample.length >= 4096) sample else fetchFull(resolved, ua)
+                        if (!full.isNullOrBlank()) {
+                            Parsers.parseAny(full, label).forEach { ch ->
+                                out += ch.copy(
+                                    group = ch.group.ifBlank { live.group.ifBlank { live.name } },
+                                    logo = ch.logo.ifBlank { live.logo },
+                                    epg = ch.epg.ifBlank { live.epg },
+                                    source = "$label·${live.name}",
+                                    userAgent = ua
+                                )
+                            }
+                        }
+                    }
+                    TvBoxParser.ContentKind.UNKNOWN -> {
+                        if (resolved.lowercase().let {
+                                it.contains(".m3u8") || it.contains(".flv") ||
+                                it.contains(".mp4") || it.startsWith("rtmp")
+                            }) {
+                            out += Channel(live.name, resolved, live.group.ifBlank { "TVBox" },
+                                logo = live.logo, epg = live.epg, source = "$label·${live.name}",
+                                userAgent = ua)
+                        }
+                    }
+                }
+            } catch (_: Exception) { }
+        }
+        return out.distinctBy { it.url }
+    }
+
+    /** 抓取头部样本（Range 请求），返回前 4096 字节文本 */
+    private fun fetchHead(url: String, ua: String): String? = try {
+        val req = Request.Builder().url(url)
+            .header("User-Agent", ua).header("Range", "bytes=0-4095").header("Accept", "*/*").build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return null
+            resp.body?.byteStream()?.use { s ->
+                val buf = ByteArray(4096); val n = s.read(buf)
+                if (n > 0) String(buf, 0, n, Charsets.UTF_8) else ""
+            }
+        }
+    } catch (_: Exception) { null }
+
+    /** 抓取完整文本 */
+    private fun fetchFull(url: String, ua: String): String? = try {
+        val req = Request.Builder().url(url).header("User-Agent", ua).header("Accept", "*/*").build()
+        client.newCall(req).execute().use { resp -> if (resp.isSuccessful) resp.body?.string() else null }
+    } catch (_: Exception) { null }
+
+    /** 导入用户提供的文本（本地文件或粘贴内容）；TVBox 配置会走二次展开 */
+    fun parseImported(text: String, label: String, configUrl: String? = null): List<Channel> {
+        if (TvBoxParser.isTvBoxConfig(text)) {
+            return expandTvBoxSync(text, configUrl ?: "", label, DEFAULT_UA)
+        }
+        return Parsers.parseAny(text, label)
+    }
 
     companion object {
         const val DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 IPTV/1.1"

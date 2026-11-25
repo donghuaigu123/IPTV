@@ -24,6 +24,7 @@ import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import com.iptv.app.R
 import com.iptv.app.core.SourceCollector
+import com.iptv.app.core.TvBoxImporter
 import com.iptv.app.data.PlaylistBus
 import com.iptv.app.data.Prefs
 import com.iptv.app.model.Channel
@@ -65,6 +66,7 @@ class LibraryFragment : Fragment() {
         })
 
         v.findViewById<MaterialButton>(R.id.btnImport).setOnClickListener { showImportDialog() }
+        v.findViewById<MaterialButton>(R.id.btnImportTvbox).setOnClickListener { showTvBoxImportDialog() }
         v.findViewById<View>(R.id.fabPlayAll).setOnClickListener {
             if (allChannels.isNotEmpty()) openPlayer(allChannels, 0)
             else Toast.makeText(requireContext(), "暂无频道", Toast.LENGTH_SHORT).show()
@@ -204,6 +206,84 @@ class LibraryFragment : Fragment() {
             }
         }
         dlg.show()
+    }
+
+    /** TVBox / 影视仓配置导入：自动展开 lives 订阅为可播放频道 */
+    private fun showTvBoxImportDialog() {
+        val ctx = requireContext()
+        val view = layoutInflater.inflate(R.layout.dialog_tvbox_import, null)
+        val etUrl = view.findViewById<EditText>(R.id.etTvBoxUrl)
+        val etPaste = view.findViewById<EditText>(R.id.etTvBoxPaste)
+        val dlg = AlertDialog.Builder(ctx).setTitle(R.string.import_tvbox).setView(view).create()
+
+        view.findViewById<MaterialButton>(R.id.btnTvBoxUrl).setOnClickListener {
+            val url = etUrl.text.toString().trim()
+            if (!url.contains("://")) {
+                Toast.makeText(ctx, "请输入有效的配置订阅地址", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            dlg.dismiss()
+            doTvBoxImport(url, null, "TVBox:${url.take(24)}")
+        }
+
+        view.findViewById<MaterialButton>(R.id.btnTvBoxPaste).setOnClickListener {
+            var text = etPaste.text.toString()
+            if (text.isBlank()) {
+                try {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    text = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                } catch (_: Exception) {}
+            }
+            if (text.isBlank()) {
+                Toast.makeText(ctx, "没有可导入的配置内容", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            dlg.dismiss()
+            doTvBoxImport(null, text, "TVBox:手动导入")
+        }
+        dlg.show()
+    }
+
+    /** 执行 TVBox 导入（URL 或文本），带进度提示 */
+    private fun doTvBoxImport(url: String?, text: String?, label: String) {
+        val ctx = requireContext()
+        val progress = AlertDialog.Builder(ctx).setTitle("正在导入 TVBox")
+            .setMessage("正在展开直播订阅，请稍候…").setCancelable(false).create()
+        progress.show()
+        lifecycleScope.launch {
+            try {
+                val importer = TvBoxImporter(ctx.applicationContext)
+                val result = if (url != null) {
+                    importer.importFromUrl(url, label) { p ->
+                        progress.setMessage("${p.stage} ${p.done}/${p.total}\n${p.message}")
+                    }
+                } else {
+                    importer.importFromText(text ?: "", url, label) { p ->
+                        progress.setMessage("${p.stage} ${p.done}/${p.total}\n${p.message}")
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    try { progress.dismiss() } catch (_: Exception) {}
+                    if (result.channels.isEmpty()) {
+                        Toast.makeText(ctx, "导入失败：未展开出可播放频道\n请检查配置地址是否有效", Toast.LENGTH_LONG).show()
+                    } else {
+                        val merged = (Prefs.getChannels(ctx) + result.channels).distinctBy { it.name + it.url }
+                        Prefs.saveChannels(ctx, merged)
+                        reload()
+                        Toast.makeText(
+                            ctx,
+                            getString(R.string.tvbox_imported, result.channels.size, result.expandedCount),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    try { progress.dismiss() } catch (_: Exception) {}
+                    Toast.makeText(ctx, "TVBox 导入异常：${e.message?.take(60)}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

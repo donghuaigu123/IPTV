@@ -89,6 +89,7 @@ class CollectorFragment : Fragment() {
             R.id.btnM3u8 to ExportFormat.M3U8,
             R.id.btnTxt to ExportFormat.TXT,
             R.id.btnJson to ExportFormat.JSON,
+            R.id.btnTvbox to ExportFormat.TVBOX,
             R.id.btnXspf to ExportFormat.XSPF,
             R.id.btnCsv to ExportFormat.CSV
         )
@@ -138,6 +139,7 @@ class CollectorFragment : Fragment() {
                 }
                 val list = Prefs.getSources(ctx)
                 val type = when {
+                    url.contains("tvbox", true) || url.contains("config", true) -> SourceConfig.TYPE_TVBOX
                     url.contains(".txt", true) -> SourceConfig.TYPE_TXT
                     else -> SourceConfig.TYPE_M3U
                 }

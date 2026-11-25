@@ -27,11 +27,12 @@ class Exporter(private val context: Context) {
 
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
             val base = "IPTV_${stamp}"
-            val fileName = "$base.${format.ext}"
+            val fileName = if (format == ExportFormat.TVBOX) "${base}_tvbox.json" else "$base.${format.ext}"
             val content = when (format) {
                 ExportFormat.M3U, ExportFormat.M3U8 -> buildM3u(channels, format == ExportFormat.M3U8)
                 ExportFormat.TXT -> buildTxt(channels)
                 ExportFormat.JSON -> buildJson(channels)
+                ExportFormat.TVBOX -> buildTvBox(channels)
                 ExportFormat.XSPF -> buildXspf(channels)
                 ExportFormat.CSV -> buildCsv(channels)
             }
@@ -83,6 +84,28 @@ class Exporter(private val context: Context) {
             )
         }
         return Gson().toJson(mapOf("generated_at" to System.currentTimeMillis(), "count" to data.size, "channels" to data))
+    }
+
+    /** 生成 TVBox 可用的订阅配置：把有效频道直接写入 lives，并携带频道 UA，导入后即可播放 */
+    fun buildTvBox(channels: List<Channel>): String {
+        val valid = channels.filter { it.status != Channel.STATUS_FAIL }
+        val lives = valid.take(3000).map { ch ->
+            val m = mutableMapOf<String, Any>(
+                "name" to ch.name,
+                "url" to ch.url,
+                "group" to ch.group.ifBlank { "IPTV" },
+                "type" to 0
+            )
+            if (ch.userAgent.isNotBlank()) m["ua"] = ch.userAgent
+            if (ch.logo.isNotBlank()) m["logo"] = ch.logo
+            m.toMap()
+        }
+        return Gson().toJson(
+            mapOf(
+                "name" to "IPTV 聚合（有效源）",
+                "lives" to lives
+            )
+        )
     }
 
     fun buildXspf(channels: List<Channel>): String = buildString {
