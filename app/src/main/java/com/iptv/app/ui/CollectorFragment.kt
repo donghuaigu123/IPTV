@@ -156,61 +156,105 @@ class CollectorFragment : Fragment() {
     }
 
     private fun startCollect() {
-        val ctx = requireContext()
+        val ctx = requireContext().applicationContext
         job?.cancel()
         job = lifecycleScope.launch {
             btnCollect.isEnabled = false
             swipe.isRefreshing = true
-            val sources = Prefs.getSources(ctx)
-            val c = SourceCollector(ctx)
-            collector = c
-            val channels = c.collect(sources) { p -> updateProgress(p) }
-            Prefs.saveChannels(ctx, channels)
-            updateSummary()
-            btnCollect.isEnabled = true
-            swipe.isRefreshing = false
+            try {
+                val sources = Prefs.getSources(ctx)
+                val c = SourceCollector(ctx)
+                collector = c
+                val channels = c.collect(sources) { p -> updateProgress(p) }
+                Prefs.saveChannels(ctx, channels)
+                updateSummary()
 
-            if (Prefs.getBool(ctx, Prefs.KEY_AUTO_CHECK, true) && channels.isNotEmpty()) {
-                startCheck()
-            } else {
-                Toast.makeText(ctx, "采集完成：${channels.size} 个频道", Toast.LENGTH_SHORT).show()
+                if (Prefs.getBool(ctx, Prefs.KEY_AUTO_CHECK, true) && channels.isNotEmpty()) {
+                    // 在同一协程里直接执行检测，避免 startCheck() 内部 job?.cancel() 取消自身导致协程异常
+                    doCheck(ctx)
+                } else {
+                    safeToast(ctx, "采集完成：${channels.size} 个频道")
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 用户主动取消，正常退出
+            } catch (e: Exception) {
+                safeToast(ctx, "采集失败：${e.message?.take(50)}")
+            } finally {
+                if (isAdded) {
+                    btnCollect.isEnabled = true
+                    swipe.isRefreshing = false
+                }
             }
         }
     }
 
     private fun startCheck() {
-        val ctx = requireContext()
+        val ctx = requireContext().applicationContext
         val channels = Prefs.getChannels(ctx)
         if (channels.isEmpty()) {
-            Toast.makeText(ctx, "请先采集或导入频道", Toast.LENGTH_SHORT).show()
+            safeToast(ctx, "请先采集或导入频道")
             return
         }
         job?.cancel()
-        job = lifecycleScope.launch {
-            btnCheck.isEnabled = false
+        job = lifecycleScope.launch { doCheck(ctx) }
+    }
+
+    /** 执行可用性检测（suspend，供采集后自动检测与手动检测共用） */
+    private suspend fun doCheck(ctx: android.content.Context) {
+        if (!isAdded) return
+        btnCheck.isEnabled = false
+        try {
+            val channels = Prefs.getChannels(ctx)
+            if (channels.isEmpty()) return
             val checker = ChannelChecker(ctx)
             val checked = checker.check(channels) { p -> updateProgress(p) }
             Prefs.saveChannels(ctx, checked)
             updateSummary()
-            btnCheck.isEnabled = true
-            Toast.makeText(ctx, "检测完成：可用 ${checked.count { it.isOk }} 个", Toast.LENGTH_SHORT).show()
+            safeToast(ctx, "检测完成：可用 ${checked.count { it.isOk }} 个")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+        } catch (e: Exception) {
+            safeToast(ctx, "检测失败：${e.message?.take(50)}")
+        } finally {
+            if (isAdded) btnCheck.isEnabled = true
         }
     }
 
+    /** 线程安全地弹出 Toast */
+    private fun safeToast(ctx: android.content.Context, msg: String) {
+        val activity = activity ?: return
+        activity.runOnUiThread {
+            try { Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * 采集/检测的进度回调来自 Dispatchers.IO 线程，必须切回主线程更新 UI，
+     * 否则会抛 CalledFromWrongThreadException 导致闪退。
+     */
     private fun updateProgress(p: CollectProgress) {
-        tvProgress.text = "${p.stage} · ${p.message}"
-        if (p.total > 0) progressBar.progress = (p.done * 100 / p.total).coerceIn(0, 100)
+        if (!isAdded || context == null) return
+        val activity = activity ?: return
+        activity.runOnUiThread {
+            if (!isAdded || context == null) return@runOnUiThread
+            try {
+                tvProgress.text = "${p.stage} · ${p.message}"
+                if (p.total > 0) progressBar.progress = (p.done * 100 / p.total).coerceIn(0, 100)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun updateSummary() {
-        val ctx = requireContext()
-        val list = Prefs.getChannels(ctx)
-        val ok = list.count { it.isOk }
-        val fail = list.count { it.status == com.iptv.app.model.Channel.STATUS_FAIL }
-        tvStatChannels.text = list.size.toString()
-        tvStatOk.text = ok.toString()
-        tvStatSources.text = Prefs.getSources(ctx).count { it.enabled }.toString()
-        tvSummary.text = "共 ${list.size} 个频道 · 可用 $ok · 失效 $fail"
+        if (!isAdded || context == null) return
+        try {
+            val ctx = requireContext()
+            val list = Prefs.getChannels(ctx)
+            val ok = list.count { it.isOk }
+            val fail = list.count { it.status == com.iptv.app.model.Channel.STATUS_FAIL }
+            tvStatChannels.text = list.size.toString()
+            tvStatOk.text = ok.toString()
+            tvStatSources.text = Prefs.getSources(ctx).count { it.enabled }.toString()
+            tvSummary.text = "共 ${list.size} 个频道 · 可用 $ok · 失效 $fail"
+        } catch (_: Exception) {}
     }
 
     /** 展示每个数据源的采集诊断信息 */
@@ -245,10 +289,14 @@ class CollectorFragment : Fragment() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_DIR && resultCode == Activity.RESULT_OK) {
             val uri: Uri = data?.data ?: return
-            requireContext().contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
+            try {
+                requireContext().contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {
+                // 部分机型不支持持久化授权，仅本次会话有效，仍可继续使用
+            }
             Prefs.setTreeUri(requireContext(), uri.toString())
             updateDirLabel()
         }
@@ -260,23 +308,27 @@ class CollectorFragment : Fragment() {
     }
 
     private fun export(format: ExportFormat) {
-        val ctx = requireContext()
+        val ctx = requireContext().applicationContext
         val channels = Prefs.getChannels(ctx)
         if (channels.isEmpty()) {
-            Toast.makeText(ctx, "没有可导出的频道", Toast.LENGTH_SHORT).show()
+            safeToast(ctx, "没有可导出的频道")
             return
         }
         if (Prefs.getTreeUri(ctx) == null) {
-            Toast.makeText(ctx, "请先在设置或采集页选择下载目录", Toast.LENGTH_LONG).show()
+            safeToast(ctx, "请先在设置或采集页选择下载目录")
             chooseDir()
             return
         }
         lifecycleScope.launch {
-            val result = Exporter(ctx).export(channels, format)
-            result.fold(
-                onSuccess = { uri -> Toast.makeText(ctx, getString(R.string.export_success, uri.lastPathSegment), Toast.LENGTH_LONG).show() },
-                onFailure = { e -> Toast.makeText(ctx, getString(R.string.export_fail, e.message), Toast.LENGTH_LONG).show() }
-            )
+            try {
+                val result = Exporter(ctx).export(channels, format)
+                result.fold(
+                    onSuccess = { uri -> safeToast(ctx, getString(R.string.export_success, uri.lastPathSegment ?: "文件")) },
+                    onFailure = { e -> safeToast(ctx, getString(R.string.export_fail, e.message ?: "未知错误")) }
+                )
+            } catch (e: Exception) {
+                safeToast(ctx, "导出异常：${e.message?.take(50)}")
+            }
         }
     }
 

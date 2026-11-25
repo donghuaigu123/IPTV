@@ -25,6 +25,7 @@ import com.google.android.material.chip.ChipGroup
 import com.google.gson.Gson
 import com.iptv.app.R
 import com.iptv.app.core.SourceCollector
+import com.iptv.app.data.PlaylistBus
 import com.iptv.app.data.Prefs
 import com.iptv.app.model.Channel
 import kotlinx.coroutines.Dispatchers
@@ -155,15 +156,23 @@ class LibraryFragment : Fragment() {
             if (!url.contains("://")) { Toast.makeText(ctx, "请输入有效地址", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
             dlg.dismiss()
             lifecycleScope.launch {
-                val text = withContext(Dispatchers.IO) { fetchText(url) }
-                if (text == null) {
-                    Toast.makeText(ctx, "导入失败：无法获取内容", Toast.LENGTH_LONG).show()
-                } else {
-                    val chans = SourceCollector(ctx).parseImported(text, "导入:${url.take(30)}")
-                    val merged = (Prefs.getChannels(ctx) + chans).distinctBy { it.name + it.url }
-                    Prefs.saveChannels(ctx, merged)
-                    reload()
-                    Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+                try {
+                    val text = withContext(Dispatchers.IO) { fetchText(url) }
+                    if (text.isNullOrBlank()) {
+                        Toast.makeText(ctx, "导入失败：无法获取内容", Toast.LENGTH_LONG).show()
+                    } else {
+                        val chans = SourceCollector(ctx).parseImported(text, "导入:${url.take(30)}")
+                        if (chans.isEmpty()) {
+                            Toast.makeText(ctx, "导入失败：未识别到有效频道", Toast.LENGTH_LONG).show()
+                        } else {
+                            val merged = (Prefs.getChannels(ctx) + chans).distinctBy { it.name + it.url }
+                            Prefs.saveChannels(ctx, merged)
+                            reload()
+                            Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "导入异常：${e.message?.take(50)}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -177,16 +186,23 @@ class LibraryFragment : Fragment() {
         view.findViewById<Button>(R.id.btnImportPaste).setOnClickListener {
             var text = etPaste.text.toString()
             if (text.isBlank()) {
-                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                text = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                try {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    text = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                } catch (_: Exception) {}
             }
             if (text.isBlank()) { Toast.makeText(ctx, "没有可导入的内容", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
-            val chans = SourceCollector(ctx).parseImported(text, "手动导入")
-            val merged = (Prefs.getChannels(ctx) + chans).distinctBy { it.name + it.url }
-            Prefs.saveChannels(ctx, merged)
-            reload()
-            dlg.dismiss()
-            Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+            try {
+                val chans = SourceCollector(ctx).parseImported(text, "手动导入")
+                if (chans.isEmpty()) { Toast.makeText(ctx, "未识别到有效频道", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+                val merged = (Prefs.getChannels(ctx) + chans).distinctBy { it.name + it.url }
+                Prefs.saveChannels(ctx, merged)
+                reload()
+                dlg.dismiss()
+                Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "导入异常：${e.message?.take(50)}", Toast.LENGTH_SHORT).show()
+            }
         }
         dlg.show()
     }
@@ -195,16 +211,25 @@ class LibraryFragment : Fragment() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_IMPORT_FILE && resultCode == Activity.RESULT_OK) {
             val uri = data?.data ?: return
+            val ctx = requireContext().applicationContext
             lifecycleScope.launch {
-                val text = withContext(Dispatchers.IO) {
-                    requireContext().contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                }
-                if (text != null) {
-                    val chans = SourceCollector(requireContext()).parseImported(text, "文件导入")
-                    val merged = (Prefs.getChannels(requireContext()) + chans).distinctBy { it.name + it.url }
-                    Prefs.saveChannels(requireContext(), merged)
-                    reload()
-                    Toast.makeText(requireContext(), getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+                try {
+                    val text = withContext(Dispatchers.IO) {
+                        ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                    }
+                    if (!text.isNullOrBlank()) {
+                        val chans = SourceCollector(ctx).parseImported(text, "文件导入")
+                        if (chans.isEmpty()) {
+                            Toast.makeText(ctx, "未识别到有效频道", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val merged = (Prefs.getChannels(ctx) + chans).distinctBy { it.name + it.url }
+                            Prefs.saveChannels(ctx, merged)
+                            reload()
+                            Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "文件导入失败：${e.message?.take(50)}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -218,10 +243,20 @@ class LibraryFragment : Fragment() {
     } catch (e: Exception) { null }
 
     private fun openPlayer(channels: List<Channel>, index: Int) {
+        if (channels.isEmpty()) {
+            Toast.makeText(requireContext(), "暂无可播放的频道", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // 通过进程内总线传递，避免超长 JSON 撑爆 Intent Binder 事务（TransactionTooLargeException）
+        val safeIndex = index.coerceIn(0, channels.size - 1)
+        PlaylistBus.set(channels)
         val intent = Intent(requireContext(), PlayerActivity::class.java)
-        intent.putExtra("channels", Gson().toJson(channels))
-        intent.putExtra("index", index)
-        startActivity(intent)
+        intent.putExtra("index", safeIndex)
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(requireContext(), "无法打开播放器：${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     companion object {

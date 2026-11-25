@@ -96,10 +96,15 @@ class SourceAdapter(
         val s = items[position]
         holder.name.text = s.name
         holder.url.text = s.url
+        // 先移除旧监听，避免复用时 setChecked 触发上一次绑定的监听
+        holder.cb.setOnCheckedChangeListener(null)
         holder.cb.isChecked = s.enabled
         holder.cb.setOnCheckedChangeListener { _, b ->
-            items[holder.adapterPosition] = s.copy(enabled = b)
-            onChanged()
+            val pos = holder.bindingAdapterPosition
+            if (pos != RecyclerView.NO_POSITION && pos < items.size) {
+                items[pos] = s.copy(enabled = b)
+                onChanged()
+            }
         }
         holder.del.setOnClickListener { onDelete(s) }
         holder.edit.setOnClickListener { onEdit(s) }

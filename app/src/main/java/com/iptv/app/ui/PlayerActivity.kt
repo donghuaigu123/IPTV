@@ -44,6 +44,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.iptv.app.R
 import com.iptv.app.core.SourceCollector
+import com.iptv.app.data.PlaylistBus
 import com.iptv.app.data.Prefs
 import com.iptv.app.model.Channel
 import kotlin.math.abs
@@ -76,11 +77,12 @@ class PlayerActivity : AppCompatActivity() {
     private var gestureMode = 0 // 1=音量 2=亮度 3=进度
     private var touchStartY = 0f
     private var touchStartX = 0f
+    private var playerReleased = false
 
     private val updateTask = object : Runnable {
         override fun run() {
-            if (!isFinishing) {
-                updateTime()
+            if (!isFinishing && !isDestroyed && !playerReleased) {
+                try { updateTime() } catch (_: Exception) {}
                 handler.postDelayed(this, 500)
             }
         }
@@ -91,15 +93,29 @@ class PlayerActivity : AppCompatActivity() {
         setContentView(R.layout.activity_player)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val json = intent.getStringExtra("channels") ?: "[]"
-        channels = try {
-            Gson().fromJson(json, object : TypeToken<List<Channel>>() {}.type) ?: emptyList()
-        } catch (e: Exception) { emptyList() }
+        // 优先从进程内总线取列表（避免 Intent 传超长 JSON 导致 TransactionTooLargeException）；
+        // 总线为空时（如进程被回收后重建）回退到本地缓存。
+        channels = PlaylistBus.get().ifEmpty { Prefs.getChannels(this) }
+        if (channels.isEmpty()) {
+            // 兼容旧版本可能通过 Intent 传 JSON 的情况
+            val json = intent.getStringExtra("channels")
+            if (!json.isNullOrBlank()) {
+                channels = try {
+                    Gson().fromJson(json, object : TypeToken<List<Channel>>() {}.type) ?: emptyList()
+                } catch (e: Exception) { emptyList() }
+            }
+        }
         currentIndex = intent.getIntExtra("index", 0).coerceIn(0, (channels.size - 1).coerceAtLeast(0))
 
         findViews()
         setupDrawer()
-        setupPlayer()
+        try {
+            setupPlayer()
+        } catch (e: Exception) {
+            Toast.makeText(this, "播放器初始化失败：${e.message?.take(60)}", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
         setupControls()
         setupGestures()
         playCurrent()
@@ -183,26 +199,34 @@ class PlayerActivity : AppCompatActivity() {
                 playWhenReady = true
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
-                        when (state) {
-                            Player.STATE_BUFFERING -> tvCenterHint.apply { text = "缓冲中…"; visibility = View.VISIBLE }
-                            Player.STATE_READY -> {
-                                tvCenterHint.visibility = View.GONE
-                                updateTime()
+                        if (playerReleased || isFinishing || isDestroyed) return
+                        try {
+                            when (state) {
+                                Player.STATE_BUFFERING -> tvCenterHint.apply { text = "缓冲中…"; visibility = View.VISIBLE }
+                                Player.STATE_READY -> {
+                                    tvCenterHint.visibility = View.GONE
+                                    updateTime()
+                                }
+                                Player.STATE_ENDED -> { tvCenterHint.apply { text = "播放结束"; visibility = View.VISIBLE } }
                             }
-                            Player.STATE_ENDED -> { tvCenterHint.apply { text = "播放结束"; visibility = View.VISIBLE } }
-                        }
-                        updatePlayButton()
+                            updatePlayButton()
+                        } catch (_: Exception) {}
                     }
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
-                        updatePlayButton()
-                        window.setFlags(
-                            if (isPlaying) WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON else 0,
-                            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                        )
+                        if (playerReleased || isFinishing || isDestroyed) return
+                        try {
+                            updatePlayButton()
+                            window.setFlags(
+                                if (isPlaying) WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON else 0,
+                                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                            )
+                        } catch (_: Exception) {}
                     }
                     override fun onPlayerError(error: PlaybackException) {
-                        tvCenterHint.apply { text = "播放失败：${error.message?.take(80)}"; visibility = View.VISIBLE }
-                        Toast.makeText(ctx, "播放失败，尝试切换线路或检查网络", Toast.LENGTH_LONG).show()
+                        if (playerReleased || isFinishing || isDestroyed) return
+                        try {
+                            tvCenterHint.apply { text = "播放失败：${error.message?.take(80)}"; visibility = View.VISIBLE }
+                        } catch (_: Exception) {}
                     }
                     override fun onVideoSizeChanged(size: VideoSize) {
                         // Media3 自动处理画面比例
@@ -221,18 +245,30 @@ class PlayerActivity : AppCompatActivity() {
             finish()
             return
         }
+        if (playerReleased || !::player.isInitialized) return
+        if (currentIndex !in channels.indices) currentIndex = 0
         val ch = channels[currentIndex]
         tvTitle.text = "${ch.name}  ·  ${ch.group}"
         Prefs.putInt(this, Prefs.KEY_LAST_PLAYED, currentIndex)
-        val item = MediaItem.Builder()
-            .setUri(ch.url)
-            .setTag(ch)
-            .build()
-        player.setMediaItem(item)
-        player.prepare()
-        player.playWhenReady = true
-        tvCenterHint.apply { text = "正在连接：${ch.name}"; visibility = View.VISIBLE }
-        updatePlayButton()
+
+        val url = ch.url.trim()
+        if (!url.contains("://")) {
+            tvCenterHint.apply { text = "无效地址：${url.take(60)}"; visibility = View.VISIBLE }
+            return
+        }
+        try {
+            val item = MediaItem.Builder()
+                .setUri(Uri.parse(url))
+                .setTag(ch)
+                .build()
+            player.setMediaItem(item)
+            player.prepare()
+            player.playWhenReady = true
+            tvCenterHint.apply { text = "正在连接：${ch.name}"; visibility = View.VISIBLE }
+            updatePlayButton()
+        } catch (e: Exception) {
+            tvCenterHint.apply { text = "播放地址解析失败：${e.message?.take(60)}"; visibility = View.VISIBLE }
+        }
     }
 
     private fun setupControls() {
@@ -253,15 +289,20 @@ class PlayerActivity : AppCompatActivity() {
 
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser && player.duration > 0) {
-                    tvTime.text = "${fmt(player.currentPosition)} / ${fmt(player.duration)}"
+                if (fromUser && !playerReleased && ::player.isInitialized) {
+                    try {
+                        if (player.duration > 0) tvTime.text = "${fmt(player.currentPosition)} / ${fmt(player.duration)}"
+                    } catch (_: Exception) {}
                 }
             }
             override fun onStartTrackingTouch(sb: SeekBar?) { isSeeking = true }
             override fun onStopTrackingTouch(sb: SeekBar?) {
                 isSeeking = false
-                val p = sb?.progress ?: 0
-                if (player.duration > 0) player.seekTo(player.duration * p / 1000)
+                if (playerReleased || !::player.isInitialized) return
+                try {
+                    val p = sb?.progress ?: 0
+                    if (player.duration > 0) player.seekTo(player.duration * p / 1000)
+                } catch (_: Exception) {}
             }
         })
     }
@@ -290,7 +331,9 @@ class PlayerActivity : AppCompatActivity() {
                 MotionEvent.ACTION_DOWN -> {
                     touchStartX = event.x; touchStartY = event.y
                     volumeStart = getVolume()
-                    seekStart = player.currentPosition
+                    seekStart = if (!playerReleased && ::player.isInitialized) {
+                        try { player.currentPosition } catch (_: Exception) { 0L }
+                    } else 0L
                     gestureMode = 0
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -304,10 +347,13 @@ class PlayerActivity : AppCompatActivity() {
                         1 -> setVolume(volumeStart - dy / 200f)
                         2 -> setBrightness(brightness - dy / 400f)
                         3 -> {
-                            val dur = if (player.duration > 0) player.duration else 60_000L
-                            val target = (seekStart + dx / 4 * 1000).toLong().coerceIn(0, dur)
-                            player.seekTo(target)
-                            tvCenterHint.apply { text = "快进到 ${fmt(target)}"; visibility = View.VISIBLE }
+                            if (playerReleased || !::player.isInitialized) return@setOnTouchListener false
+                            try {
+                                val dur = if (player.duration > 0) player.duration else 60_000L
+                                val target = (seekStart + dx / 4 * 1000).toLong().coerceIn(0, dur)
+                                player.seekTo(target)
+                                tvCenterHint.apply { text = "快进到 ${fmt(target)}"; visibility = View.VISIBLE }
+                            } catch (_: Exception) {}
                         }
                     }
                 }
@@ -321,12 +367,18 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun togglePlay() {
-        if (player.isPlaying) player.pause() else player.play()
-        updatePlayButton()
+        if (playerReleased || !::player.isInitialized) return
+        try {
+            if (player.isPlaying) player.pause() else player.play()
+            updatePlayButton()
+        } catch (_: Exception) {}
     }
 
     private fun updatePlayButton() {
-        btnPlayPause.setImageResource(if (player.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
+        if (playerReleased || !::player.isInitialized) return
+        try {
+            btnPlayPause.setImageResource(if (player.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
+        } catch (_: Exception) {}
     }
 
     private fun switchChannel(delta: Int) {
@@ -336,16 +388,18 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun updateTime() {
-        if (isSeeking || !::player.isInitialized) return
-        val pos = player.currentPosition
-        val dur = player.duration
-        if (dur > 0) {
-            seekBar.progress = (pos * 1000 / dur).toInt().coerceIn(0, 1000)
-            tvTime.text = "${fmt(pos)} / ${fmt(dur)}"
-        } else {
-            seekBar.progress = 0
-            tvTime.text = "${fmt(pos)} / 直播"
-        }
+        if (isSeeking || playerReleased || !::player.isInitialized) return
+        try {
+            val pos = player.currentPosition
+            val dur = player.duration
+            if (dur > 0) {
+                seekBar.progress = (pos * 1000 / dur).toInt().coerceIn(0, 1000)
+                tvTime.text = "${fmt(pos)} / ${fmt(dur)}"
+            } else {
+                seekBar.progress = 0
+                tvTime.text = "${fmt(pos)} / 直播"
+            }
+        } catch (_: Exception) {}
     }
 
     private fun fmt(ms: Long): String {
@@ -384,7 +438,11 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun setBrightness(v: Float) {
         brightness = v.coerceIn(0.05f, 1f)
-        window.attributes = window.attributes.apply { screenBrightness = brightness }
+        try {
+            val lp = window.attributes
+            lp.screenBrightness = brightness
+            window.attributes = lp
+        } catch (_: Exception) {}
         tvCenterHint.apply { text = "亮度 ${(brightness * 100).toInt()}%"; visibility = View.VISIBLE }
     }
 
@@ -409,13 +467,18 @@ class PlayerActivity : AppCompatActivity() {
         val speeds = arrayOf("0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x")
         val values = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         AlertDialog.Builder(this).setTitle("倍速播放").setItems(speeds) { _, i ->
-            player.setPlaybackSpeed(values[i])
-            Toast.makeText(this, "已设为 ${speeds[i]}", Toast.LENGTH_SHORT).show()
+            if (!playerReleased && ::player.isInitialized) {
+                try {
+                    player.setPlaybackSpeed(values[i])
+                    Toast.makeText(this, "已设为 ${speeds[i]}", Toast.LENGTH_SHORT).show()
+                } catch (_: Exception) {}
+            }
         }.show()
     }
 
     private fun showTrackDialog(type: Int) {
-        val groups = player.currentTracks.groups.filter { it.type == type }
+        if (playerReleased || !::player.isInitialized) return
+        val groups = try { player.currentTracks.groups.filter { it.type == type } } catch (_: Exception) { emptyList() }
         val labels = mutableListOf<String>("关闭")
         val selections = mutableListOf<Pair<Tracks.Group, Int>?>(null)
         groups.forEach { group ->
@@ -502,12 +565,22 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (Build.VERSION.SDK_INT >= 24 && !isInPictureInPictureMode) player.pause()
+        try {
+            if (::player.isInitialized && !playerReleased && Build.VERSION.SDK_INT >= 24 && !isInPictureInPictureMode) {
+                player.pause()
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
+        playerReleased = true
         handler.removeCallbacks(updateTask)
-        if (::player.isInitialized) player.release()
+        try {
+            if (::player.isInitialized) {
+                playerView.player = null
+                player.release()
+            }
+        } catch (_: Exception) {}
         super.onDestroy()
     }
 }

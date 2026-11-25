@@ -129,7 +129,8 @@ object SourceCatalog {
     /** 返回频道的标准名称，用于合并去重 */
     fun canonicalName(raw: String): String {
         val key = normalizeKey(raw)
-        return aliasMap[key] ?: key.ifEmpty { raw.trim() }.let { raw.trim() }
+        if (key.isEmpty()) return raw.trim()
+        return aliasMap[key] ?: key
     }
 
     /** 频道分类，用于列表分组与导出分组 */

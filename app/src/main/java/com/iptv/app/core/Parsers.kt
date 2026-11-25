@@ -9,6 +9,13 @@ import com.iptv.app.model.TvBoxSite
 object Parsers {
 
     private val attrRegex = Regex("([a-zA-Z0-9_-]+)=\"([^\"]*)\"")
+    private val timestampRegex = Regex("^\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}(\\s+\\d{1,2}:\\d{2}(:\\d{2})?)?$")
+
+    /** 判断标题是否是"YYYY-MM-DD HH:mm:ss"这类时间戳（部分源误把它当频道名） */
+    private fun isTimestampLike(s: String): Boolean {
+        val t = s.trim()
+        return t.length <= 25 && timestampRegex.matches(t)
+    }
 
     /** 解析 M3U / M3U8 文本 */
     fun parseM3u(text: String, source: String = ""): List<Channel> {
@@ -25,7 +32,11 @@ object Parsers {
             when {
                 line.startsWith("#EXTINF") -> {
                     val attrs = attrRegex.findAll(line).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
-                    val title = line.substringAfterLast(",").trim()
+                    var title = line.substringAfterLast(",").trim()
+                    // 部分源（如 Guovin）会把更新时间戳放在标题位，识别出来并回退到 tvg-name
+                    if (isTimestampLike(title)) {
+                        title = attrs["tvg-name"] ?: attrs["name"] ?: ""
+                    }
                     pendingName = title.ifBlank { attrs["tvg-name"] ?: attrs["name"] ?: "" }
                     pendingGroup = attrs["group-title"] ?: ""
                     pendingLogo = attrs["tvg-logo"] ?: ""

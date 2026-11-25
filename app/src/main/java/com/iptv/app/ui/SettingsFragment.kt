@@ -76,9 +76,13 @@ class SettingsFragment : Fragment() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_DIR && resultCode == Activity.RESULT_OK) {
             val uri: Uri = data?.data ?: return
-            requireContext().contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
+            try {
+                requireContext().contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {
+                // 部分机型不支持持久化授权，忽略
+            }
             Prefs.setTreeUri(requireContext(), uri.toString())
             updateDir()
             Toast.makeText(requireContext(), "下载目录已更新", Toast.LENGTH_SHORT).show()
