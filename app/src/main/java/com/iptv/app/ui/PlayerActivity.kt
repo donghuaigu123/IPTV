@@ -22,6 +22,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.GravityCompat
 import androidx.drawerlayout.widget.DrawerLayout
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -40,7 +41,9 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.iptv.app.R
+import com.iptv.app.core.CastController
 import com.iptv.app.core.ChannelMerger
+import com.iptv.app.core.DlnaManager
 import com.iptv.app.core.SourceCollector
 import com.iptv.app.data.PlaylistBus
 import com.iptv.app.data.Prefs
@@ -67,6 +70,14 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var seekBar: SeekBar
     private lateinit var btnPlayPause: ImageButton
     private lateinit var btnUnlock: ImageButton
+    private lateinit var btnCast: ImageButton
+    private lateinit var castStatus: LinearLayout
+    private lateinit var tvCastStatus: TextView
+
+    /** 投屏控制器 */
+    private lateinit var castController: CastController
+    /** 投屏时的播放态（电视端），本地播放器在投屏时暂停 */
+    private var castPlaying = false
 
     /** 频道组列表（合并后的频道，每组含 N 条线路） */
     private var groups: List<ChannelGroup> = emptyList()
@@ -204,6 +215,7 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         findViews()
+        setupCast()
         setupDrawer()
         try {
             setupPlayer()
@@ -234,6 +246,51 @@ class PlayerActivity : AppCompatActivity() {
         seekBar = findViewById(R.id.seekBar)
         btnPlayPause = findViewById(R.id.btnPlayPause)
         btnUnlock = findViewById(R.id.btnUnlock)
+        btnCast = findViewById(R.id.btnCast)
+        castStatus = findViewById(R.id.castStatus)
+        tvCastStatus = findViewById(R.id.tvCastStatus)
+    }
+
+    /** 初始化投屏控制器（生命周期感知，Activity 销毁自动取消协程） */
+    private fun setupCast() {
+        castController = CastController(this, lifecycleScope, object : CastController.Listener {
+            override fun onCastStateChanged(state: CastController.State, deviceName: String) {
+                if (playerReleased || isFinishing || isDestroyed) return
+                when (state) {
+                    CastController.State.CASTING -> {
+                        castStatus.visibility = View.VISIBLE
+                        tvCastStatus.text = "投屏中 · $deviceName"
+                        btnCast.setColorFilter(resources.getColor(R.color.accent, theme))
+                        // 投屏后暂停本地解码，避免双重播放与耗电
+                        try { if (::player.isInitialized) player.pause() } catch (_: Exception) {}
+                        castPlaying = true
+                        updatePlayButton()
+                    }
+                    CastController.State.IDLE -> {
+                        val wasCasting = castStatus.visibility == View.VISIBLE
+                        castStatus.visibility = View.GONE
+                        btnCast.clearColorFilter()
+                        castPlaying = false
+                        // 仅当从投屏态断开时才恢复本地播放；首次连接失败不打断当前播放
+                        if (wasCasting) {
+                            try { playCurrentLine() } catch (_: Exception) {}
+                        }
+                        updatePlayButton()
+                    }
+                    CastController.State.CONNECTING -> {
+                        btnCast.setColorFilter(resources.getColor(R.color.warning, theme))
+                    }
+                }
+            }
+            override fun onBusy(busy: Boolean, message: String) {
+                if (playerReleased || isFinishing || isDestroyed) return
+                if (busy) {
+                    tvCenterHint.apply { text = message; visibility = View.VISIBLE }
+                } else {
+                    tvCenterHint.visibility = View.GONE
+                }
+            }
+        })
     }
 
     private fun setupDrawer() {
@@ -490,7 +547,7 @@ class PlayerActivity : AppCompatActivity() {
         handler.removeCallbacks(switchTimeoutTask)
         currentLineIndex = index
         try { if (::player.isInitialized) player.stop() } catch (_: Exception) {}
-        playCurrentLine()
+        if (castController.isCasting()) pushCurrentToCast() else playCurrentLine()
     }
 
     private fun updateTitle() {
@@ -514,6 +571,8 @@ class PlayerActivity : AppCompatActivity() {
         findViewById<View>(R.id.btnNext).setOnClickListener { switchChannel(1) }
         findViewById<View>(R.id.btnPip).setOnClickListener { enterPip() }
         findViewById<View>(R.id.btnFullscreen).setOnClickListener { toggleFullscreen() }
+        btnCast.setOnClickListener { openCastDialog() }
+        castStatus.setOnClickListener { openCastControlDialog() }
 
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -643,7 +702,15 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun togglePlay() {
-        if (playerReleased || !::player.isInitialized) return
+        if (playerReleased) return
+        // 投屏时控制电视端播放/暂停
+        if (castController.isCasting()) {
+            castPlaying = !castPlaying
+            if (castPlaying) castController.play() else castController.pause()
+            updatePlayButton()
+            return
+        }
+        if (!::player.isInitialized) return
         try {
             if (player.isPlaying) player.pause() else player.play()
             updatePlayButton()
@@ -651,9 +718,12 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun updatePlayButton() {
-        if (playerReleased || !::player.isInitialized) return
+        if (playerReleased) return
         try {
-            btnPlayPause.setImageResource(if (player.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
+            val playing = if (castController.isCasting()) castPlaying
+                          else if (::player.isInitialized) player.isPlaying
+                          else false
+            btnPlayPause.setImageResource(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
         } catch (_: Exception) {}
     }
 
@@ -674,7 +744,7 @@ class PlayerActivity : AppCompatActivity() {
         handler.removeCallbacks(retryTask)
         handler.removeCallbacks(switchTimeoutTask)
         try { if (::player.isInitialized) player.stop() } catch (_: Exception) {}
-        playCurrentLine()
+        if (castController.isCasting()) pushCurrentToCast() else playCurrentLine()
     }
 
     private fun updateTime() {
@@ -752,10 +822,18 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun setVolume(v: Float) {
+        val pct = (v.coerceIn(0f, 1f) * 100).toInt()
+        if (castController.isCasting()) {
+            // 投屏时调电视端音量，本地保持静音由电视出声
+            tvVolume = pct
+            castController.setVolume(pct)
+            tvCenterHint.apply { text = "电视音量 $pct%"; visibility = View.VISIBLE }
+            return
+        }
         val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
         am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, (v.coerceIn(0f, 1f) * max).toInt(), 0)
-        tvCenterHint.apply { text = "音量 ${(v * 100).toInt()}%"; visibility = View.VISIBLE }
+        tvCenterHint.apply { text = "音量 $pct%"; visibility = View.VISIBLE }
     }
 
     private fun setBrightness(v: Float) {
@@ -779,11 +857,92 @@ class PlayerActivity : AppCompatActivity() {
                     2 -> showTrackDialog(C.TRACK_TYPE_TEXT)
                     3 -> showRatioDialog()
                     4 -> showLinePicker()
-                    5 -> Toast.makeText(this, "投屏：请确保同一局域网内有 Chromecast / 智能电视设备", Toast.LENGTH_LONG).show()
+                    5 -> if (castController.isCasting()) openCastControlDialog() else openCastDialog()
                     6 -> copyCurrentUrl()
                     7 -> showChannelInfo()
                 }
             }.show()
+    }
+
+    // ==================== 投屏 ====================
+
+    /** 打开投屏入口：正在投屏则进控制页，否则扫描设备 */
+    private fun openCastDialog() {
+        if (castController.isCasting()) {
+            openCastControlDialog()
+            return
+        }
+        val channels = groups.getOrNull(currentGroupIndex)?.channels ?: emptyList()
+        if (channels.isEmpty()) {
+            Toast.makeText(this, "暂无可播放的频道", Toast.LENGTH_SHORT).show()
+            return
+        }
+        castController.discover { devices ->
+            if (isFinishing || isDestroyed || playerReleased) return@discover
+            if (devices.isEmpty()) {
+                AlertDialog.Builder(this)
+                    .setTitle("未发现投屏设备")
+                    .setMessage("请确认：\n1. 手机与电视连接同一个 Wi-Fi\n2. 电视已开启 DLNA / 多屏互动（通常在「设置-网络」中）\n3. 电视未开启 AP 隔离（访客网络）")
+                    .setPositiveButton("重新搜索") { _, _ -> openCastDialog() }
+                    .setNegativeButton(R.string.cancel, null)
+                    .show()
+                return@discover
+            }
+            val names = devices.map { d ->
+                "${d.name}${if (d.udn.isNotBlank()) "" else "  ·  ${d.location.substringBefore('/')}"}"
+            }.toTypedArray()
+            AlertDialog.Builder(this)
+                .setTitle("选择投屏设备（发现 ${devices.size} 台）")
+                .setItems(names) { _, which ->
+                    val target = devices.getOrNull(which) ?: return@setItems
+                    val ch = channels.getOrNull(currentLineIndex.coerceIn(channels.indices)) ?: channels[0]
+                    val ua = ch.userAgent.ifBlank { Prefs.getString(this, Prefs.KEY_UA, SourceCollector.DEFAULT_UA) }
+                    val title = "${groups[currentGroupIndex].name}${if (groups[currentGroupIndex].lineCount > 1) " · 线路${currentLineIndex + 1}" else ""}"
+                    castController.connect(target, ch.url, ua, title)
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+        }
+    }
+
+    /** 投屏中的控制：播放/暂停、音量、切台提示、断开 */
+    private fun openCastControlDialog() {
+        if (!castController.isCasting()) return
+        val items = arrayOf(
+            if (castPlaying) "暂停" else "播放",
+            "电视音量 +",
+            "电视音量 −",
+            "重播当前频道",
+            "断开投屏（恢复本机播放）"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("投屏控制")
+            .setItems(items) { _, i ->
+                when (i) {
+                    0 -> { castPlaying = !castPlaying; if (castPlaying) castController.play() else castController.pause(); updatePlayButton() }
+                    1 -> castController.setVolume(tvVolume + 10)
+                    2 -> castController.setVolume(tvVolume - 10)
+                    3 -> pushCurrentToCast()
+                    4 -> castController.disconnect()
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /** 电视端音量缓存（0-100），用于 +/- 控制 */
+    private var tvVolume = 50
+
+    /** 把当前频道/线路推送到电视（投屏中切台或切线路时调用） */
+    private fun pushCurrentToCast() {
+        if (!castController.isCasting()) return
+        val g = groups.getOrNull(currentGroupIndex) ?: return
+        val ch = g.channels.getOrNull(currentLineIndex) ?: return
+        val ua = ch.userAgent.ifBlank { Prefs.getString(this, Prefs.KEY_UA, SourceCollector.DEFAULT_UA) }
+        val title = "${g.name}${if (g.lineCount > 1) " · 线路${currentLineIndex + 1}" else ""}"
+        castController.switchSource(ch.url, ua, title)
+        castPlaying = true
+        updatePlayButton()
     }
 
     private fun showSpeedDialog() {
@@ -916,6 +1075,7 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         playerReleased = true
+        try { if (::castController.isInitialized) castController.release() } catch (_: Exception) {}
         handler.removeCallbacks(updateTask)
         handler.removeCallbacks(switchTimeoutTask)
         handler.removeCallbacks(retryTask)
