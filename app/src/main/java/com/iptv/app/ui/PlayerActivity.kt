@@ -152,6 +152,25 @@ class PlayerActivity : AppCompatActivity() {
         if (!playerReleased && !isFinishing && !isDestroyed) tvCenterHint.visibility = View.GONE
     }
 
+    /** 当前线路是否已做过音轨检测提示，避免重复打扰 */
+    private var audioWarnedForLine = false
+    /** 播放稳定后检测音轨：源无音轨 / 音轨全部不支持时给出明确提示 */
+    private val audioCheckTask = Runnable {
+        if (playerReleased || isFinishing || isDestroyed || audioWarnedForLine) return@Runnable
+        if (castController.isCasting()) return@Runnable
+        audioWarnedForLine = true
+        try {
+            if (!::player.isInitialized) return@Runnable
+            val audioGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+            if (audioGroups.isEmpty()) {
+                showFailureHint("该线路无音频轨 · 可换线路试试")
+            } else {
+                val anySupported = audioGroups.any { g -> (0 until g.length).any { g.isTrackSupported(it) } }
+                if (!anySupported) showFailureHint("音轨格式设备不支持 · 可换线路或开音效")
+            }
+        } catch (_: Exception) {}
+    }
+
     /** 控制栏无操作后自动隐藏，避免上下按钮栏长期遮挡视线 */
     private val hideControlsTask = Runnable {
         if (!playerReleased && !isFinishing && !isDestroyed && !locked) hideControls()
@@ -373,6 +392,9 @@ class PlayerActivity : AppCompatActivity() {
                                     updateTime()
                                     // 视频真正开始播放后，延时自动隐藏控制栏，画面无遮挡
                                     scheduleHideControls()
+                                    // v2.1.1：播放稳定后检测音轨，无音轨/不支持时明确提示
+                                    handler.removeCallbacks(audioCheckTask)
+                                    handler.postDelayed(audioCheckTask, 1500)
                                 }
                                 Player.STATE_ENDED -> { tvCenterHint.apply { text = "播放结束"; visibility = View.VISIBLE } }
                             }
@@ -423,6 +445,8 @@ class PlayerActivity : AppCompatActivity() {
         if (playerReleased || !::player.isInitialized) return
         if (currentLineIndex !in g.channels.indices) currentLineIndex = 0
         triedLines.add(currentLineIndex)
+        audioWarnedForLine = false
+        handler.removeCallbacks(audioCheckTask)
         val ch = g.channels[currentLineIndex]
         updateTitle()
         Prefs.putInt(this, Prefs.KEY_LAST_PLAYED, currentGroupIndex)
@@ -438,6 +462,8 @@ class PlayerActivity : AppCompatActivity() {
             // TVBox 导入的频道可能带专用 UA（如 okhttp/3.15），必须用该 UA 才能播放
             val ua = ch.userAgent.ifBlank { Prefs.getString(this, Prefs.KEY_UA, SourceCollector.DEFAULT_UA) }
             try { dataSourceFactory.setUserAgent(ua) } catch (_: Exception) {}
+            // v2.1.1：切台/切线路时重置上一次的音轨/字幕选择，避免旧 override 串台导致无声
+            resetTrackSelection()
             val item = MediaItem.Builder()
                 .setUri(Uri.parse(url))
                 .setTag(ch)
@@ -958,38 +984,117 @@ class PlayerActivity : AppCompatActivity() {
         }.show()
     }
 
+    /**
+     * 音轨/字幕选择对话框（v2.1.1）。
+     * - 首项「自动选择」恢复默认（清除 override、启用该类型），便于从"关闭/选错轨无声"中一键恢复；
+     * - 每条轨道标注「当前」「不支持」（设备无法解码的轨道选了也没声音）；
+     * - 「关闭」移到末尾，且二次确认，避免误点导致长期无声。
+     */
     private fun showTrackDialog(type: Int) {
         if (playerReleased || !::player.isInitialized) return
+        val isAudio = type == C.TRACK_TYPE_AUDIO
         val groupsTrack = try { player.currentTracks.groups.filter { it.type == type } } catch (_: Exception) { emptyList() }
-        val labels = mutableListOf<String>("关闭")
+        if (groupsTrack.isEmpty()) {
+            Toast.makeText(this, if (isAudio) "当前线路没有音轨，试试换一条线路" else "当前线路没有字幕轨", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val labels = mutableListOf<String>()
+        // 每项对应一个动作：null=自动选择；Pair=选中某条；"OFF"=关闭
+        val actions = mutableListOf<String>() // "AUTO" / "SEL" / "OFF"
         val selections = mutableListOf<Pair<Tracks.Group, Int>?>(null)
+        labels += "自动选择（推荐）"
+        actions += "AUTO"
+
+        var anySelected = false
         groupsTrack.forEach { group ->
             for (i in 0 until group.length) {
                 val format = group.getTrackFormat(i)
                 val label = format.label ?: format.language ?: "轨道"
-                labels += "$label (${format.sampleMimeType?.substringAfter('/') ?: "未知"})"
+                val mime = format.sampleMimeType?.substringAfter('/') ?: "未知"
+                val selected = try { group.isTrackSelected(i) } catch (_: Exception) { false }
+                val supported = try { group.isTrackSupported(i) } catch (_: Exception) { true }
+                if (selected) anySelected = true
+                val tags = buildString {
+                    if (selected) append("●当前 ")
+                    if (!supported) append("⚠不支持 ")
+                    append("($mime)")
+                }
+                labels += "$label $tags"
+                actions += "SEL"
                 selections += group to i
             }
         }
-        AlertDialog.Builder(this).setTitle(if (type == C.TRACK_TYPE_AUDIO) "选择音轨" else "选择字幕")
+        // 没有音轨被选中时，首项标注为当前，提示用户当前处于无声状态
+        if (!anySelected) labels[0] = "自动选择（推荐） · 当前未选轨"
+
+        labels += if (isAudio) "关闭声音" else "关闭字幕"
+        actions += "OFF"
+        selections += null
+
+        AlertDialog.Builder(this)
+            .setTitle(if (isAudio) "选择音轨 · 共 ${selections.size - 2} 条" else "选择字幕")
             .setItems(labels.toTypedArray()) { _, i ->
-                val sel = selections.getOrNull(i)
-                if (sel == null) clearTracks(type) else selectTrack(sel.first, sel.second)
-            }.show()
+                when (actions.getOrNull(i)) {
+                    "AUTO" -> { resetTrackSelection(); Toast.makeText(this, "已恢复自动选轨", Toast.LENGTH_SHORT).show() }
+                    "SEL" -> selections.getOrNull(i)?.let { selectTrack(it.first, it.second) }
+                    "OFF" -> confirmClearTracks(type)
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /** 关闭音轨/字幕前二次确认，避免误点造成长期无声 */
+    private fun confirmClearTracks(type: Int) {
+        AlertDialog.Builder(this)
+            .setTitle(if (type == C.TRACK_TYPE_AUDIO) "关闭声音？" else "关闭字幕？")
+            .setMessage(if (type == C.TRACK_TYPE_AUDIO)
+                "关闭后当前频道将没有声音，切换频道会自动恢复。确定关闭吗？"
+                else "确定关闭字幕吗？切换频道会自动恢复。")
+            .setPositiveButton(R.string.ok) { _, _ -> clearTracks(type) }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * 重置轨道选择：清除手动 override、恢复音轨/字幕启用状态。
+     * 切台/切线路、点击「自动选择」时调用，修复手动选轨或关闭后串台无声的问题。
+     */
+    private fun resetTrackSelection() {
+        if (!::trackSelector.isInitialized) return
+        try {
+            trackSelector.setParameters(
+                trackSelector.buildUponParameters()
+                    .clearOverrides()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            )
+        } catch (_: Exception) {}
     }
 
     private fun clearTracks(type: Int) {
-        val b = trackSelector.buildUponParameters().setTrackTypeDisabled(type, true)
-        trackSelector.setParameters(b)
+        try {
+            trackSelector.setParameters(
+                trackSelector.buildUponParameters().setTrackTypeDisabled(type, true)
+            )
+            Toast.makeText(this, if (type == C.TRACK_TYPE_AUDIO) "已关闭声音（切台后自动恢复）" else "已关闭字幕", Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {}
     }
 
     private fun selectTrack(group: Tracks.Group, index: Int) {
         try {
+            val supported = group.isTrackSupported(index)
             val override = androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index)
             val b = trackSelector.buildUponParameters()
                 .setTrackTypeDisabled(group.type, false)
                 .setOverrideForType(override)
             trackSelector.setParameters(b)
+            if (!supported && group.type == C.TRACK_TYPE_AUDIO) {
+                Toast.makeText(this, "注意：这条音轨当前设备可能无法解码，若仍无声请换线路", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "已切换轨道", Toast.LENGTH_SHORT).show()
+            }
         } catch (e: Exception) {
             Toast.makeText(this, "切换轨道失败：${e.message}", Toast.LENGTH_SHORT).show()
         }
@@ -1083,6 +1188,7 @@ class PlayerActivity : AppCompatActivity() {
         handler.removeCallbacks(hideControlsTask)
         handler.removeCallbacks(singleTapTask)
         handler.removeCallbacks(longPressTask)
+        handler.removeCallbacks(audioCheckTask)
         try {
             if (::player.isInitialized) {
                 playerView.player = null
