@@ -9,10 +9,13 @@ import com.iptv.app.model.SourceConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class SourceCollector(private val context: Context) {
 
@@ -25,8 +28,9 @@ class SourceCollector(private val context: Context) {
         val usedMirror: String
     )
 
+    private val lastLock = Any()
     private var lastResults = mutableListOf<SourceResult>()
-    fun getLastResults(): List<SourceResult> = lastResults.toList()
+    fun getLastResults(): List<SourceResult> = synchronized(lastLock) { lastResults.toList() }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -37,6 +41,9 @@ class SourceCollector(private val context: Context) {
 
     /**
      * 并发抓取所有启用的订阅源，GitHub Raw 源自动尝试镜像回退。
+     *
+     * 稳定性（v2.0.1）：有界并发（最多 8 个源同时进行），进度计数用原子类，
+     * 进度回调异常隔离，响应体安全读取防 OOM。
      */
     suspend fun collect(
         sources: List<SourceConfig>,
@@ -44,44 +51,64 @@ class SourceCollector(private val context: Context) {
     ): List<Channel> = withContext(Dispatchers.IO) {
         val enabled = sources.filter { it.enabled }
         val total = enabled.size
-        var done = 0
-        lastResults.clear()
-        onProgress(CollectProgress("正在连接数据源", 0, total, "共 $total 个订阅源"))
+        if (total == 0) return@withContext emptyList()
 
-        val lists = enabled.map { src ->
+        val done = AtomicInteger(0)
+        synchronized(lastLock) { lastResults = mutableListOf() }
+        safeProgress(onProgress, CollectProgress("正在连接数据源", 0, total, "共 $total 个订阅源"))
+
+        val sem = Semaphore(8)
+        val results = arrayOfNulls<List<Channel>>(total)
+        val workers = (0 until minOf(8, total)).map { workerId ->
             async {
-                val result = fetchWithFallback(src)
-                val info = result.result
-                synchronized(lastResults) { lastResults.add(info) }
-                done++
-                val short = if (info.success) "+${info.count}" else "失败"
-                onProgress(
-                    CollectProgress(
-                        "正在抓取订阅源", done, total,
-                        "${src.name} $short${if (info.usedMirror.isNotBlank()) " · ${info.usedMirror}" else ""}"
-                    )
-                )
-                // 给该来源的频道打上"网络采集源"标记，originKey 用源名称+URL区分不同订阅
-                val kind = if (src.type == SourceConfig.TYPE_TVBOX) Channel.ORIGIN_TVBOX else Channel.ORIGIN_COLLECT
-                SourceOrigin.tag(result.channels, kind, "${src.name}|${src.url}")
+                var index = workerId
+                while (index < total) {
+                    val src = enabled[index]
+                    sem.withPermit {
+                        val pair = try {
+                            fetchWithFallback(src)
+                        } catch (e: Throwable) {
+                            SourceResultWithChannels(
+                                SourceResult(src.name, 0, false, safeReason(e), ""), emptyList()
+                            )
+                        }
+                        synchronized(lastLock) { lastResults.add(pair.result) }
+                        val d = done.incrementAndGet()
+                        val info = pair.result
+                        val short = if (info.success) "+${info.count}" else "失败"
+                        safeProgress(
+                            onProgress,
+                            CollectProgress(
+                                "正在抓取订阅源", d, total,
+                                "${src.name} $short${if (info.usedMirror.isNotBlank()) " · ${info.usedMirror}" else ""}"
+                            )
+                        )
+                        val kind = if (src.type == SourceConfig.TYPE_TVBOX) Channel.ORIGIN_TVBOX else Channel.ORIGIN_COLLECT
+                        results[index] = SourceOrigin.tag(pair.channels, kind, "${src.name}|${src.url}")
+                    }
+                    index += minOf(8, total)
+                }
             }
-        }.awaitAll()
+        }
+        workers.awaitAll()
 
-        val all = lists.flatten()
-        val okSources = lastResults.count { it.success }
-        onProgress(CollectProgress("正在整理频道", total, total, "成功源 $okSources/$total · 原始条目 ${all.size} 条"))
+        val all = results.filterNotNull().flatten()
+        val okSources = synchronized(lastLock) { lastResults.count { it.success } }
+        safeProgress(onProgress, CollectProgress("正在整理频道", total, total, "成功源 $okSources/$total · 原始条目 ${all.size} 条"))
 
-        val merged = Parsers.mergeAndNormalize(
-            all,
-            Prefs.getBool(context, Prefs.KEY_RETAIN_DUP, true)
-        )
-        onProgress(CollectProgress("整理完成", total, total, "整理后 ${merged.size} 个频道"))
+        val merged = try {
+            Parsers.mergeAndNormalize(all, Prefs.getBool(context, Prefs.KEY_RETAIN_DUP, true))
+        } catch (e: Throwable) {
+            // 归一化异常时至少返回去重后的原始列表，不丢数据
+            all.distinctBy { it.url }
+        }
+        safeProgress(onProgress, CollectProgress("整理完成", total, total, "整理后 ${merged.size} 个频道"))
         merged
     }
 
     /** 带镜像回退的单源抓取：依次尝试原始地址与各加速镜像 */
     private fun fetchWithFallback(src: SourceConfig): SourceResultWithChannels {
-        val candidates = SourceCatalog.candidateUrls(src.url.trim())
+        val candidates = try { SourceCatalog.candidateUrls(src.url.trim()) } catch (_: Throwable) { listOf(src.url.trim()) }
         var lastError = ""
         candidates.forEachIndexed { index, url ->
             val label = if (index == 0) "直连" else "镜像$index"
@@ -89,19 +116,15 @@ class SourceCollector(private val context: Context) {
                 val channels = fetchOne(src.copy(url = url))
                 if (channels.isNotEmpty()) {
                     return SourceResultWithChannels(
-                        SourceResult(src.name, channels.size, true, "OK", label),
-                        channels
+                        SourceResult(src.name, channels.size, true, "OK", label), channels
                     )
                 }
                 lastError = "空内容"
-            } catch (e: Exception) {
-                lastError = e.message?.take(40) ?: "连接失败"
+            } catch (e: Throwable) {
+                lastError = safeReason(e)
             }
         }
-        return SourceResultWithChannels(
-            SourceResult(src.name, 0, false, lastError, ""),
-            emptyList()
-        )
+        return SourceResultWithChannels(SourceResult(src.name, 0, false, lastError, ""), emptyList())
     }
 
     private data class SourceResultWithChannels(val result: SourceResult, val channels: List<Channel>)
@@ -109,7 +132,7 @@ class SourceCollector(private val context: Context) {
     /** 抓取并解析单个源（具体 URL） */
     private fun fetchOne(src: SourceConfig): List<Channel> {
         val url = src.url.trim()
-        if (url.isBlank()) return emptyList()
+        if (url.isBlank() || !url.contains("://")) return emptyList()
         val ua = src.userAgent.ifBlank { Prefs.getString(context, Prefs.KEY_UA, DEFAULT_UA) }
         val request = Request.Builder()
             .url(url)
@@ -118,7 +141,9 @@ class SourceCollector(private val context: Context) {
             .build()
         client.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
-            val body = resp.body?.string() ?: return emptyList()
+            // 安全读取，限制大小，杜绝异常源 OOM
+            val read = SafeBody.readText(resp)
+            val body = read.text
             if (body.isBlank() || body.length < 50) return emptyList()
 
             return when (src.type) {
@@ -131,7 +156,7 @@ class SourceCollector(private val context: Context) {
 
     /**
      * 同步展开 TVBox 配置（采集流程在 IO 线程调用）。
-     * 关键：lives[].url 是订阅列表地址，必须二次抓取解析；直接流地址则直接建频道。
+     * lives[].url 是订阅列表地址时必须二次抓取解析；直接流地址则直接建频道。
      */
     private fun expandTvBoxSync(
         text: String, configUrl: String, label: String, defaultUa: String
@@ -147,8 +172,7 @@ class SourceCollector(private val context: Context) {
                 when (TvBoxParser.detectContentKind(resolved, sample)) {
                     TvBoxParser.ContentKind.DIRECT ->
                         out += Channel(live.name, resolved, live.group.ifBlank { "TVBox" },
-                            logo = live.logo, epg = live.epg, source = "$label·${live.name}",
-                            userAgent = ua)
+                            logo = live.logo, epg = live.epg, source = "$label·${live.name}", userAgent = ua)
                     TvBoxParser.ContentKind.PLAYLIST -> {
                         val full = if (sample != null && sample.length >= 4096) sample else fetchFull(resolved, ua)
                         if (!full.isNullOrBlank()) {
@@ -169,12 +193,11 @@ class SourceCollector(private val context: Context) {
                                 it.contains(".mp4") || it.startsWith("rtmp")
                             }) {
                             out += Channel(live.name, resolved, live.group.ifBlank { "TVBox" },
-                                logo = live.logo, epg = live.epg, source = "$label·${live.name}",
-                                userAgent = ua)
+                                logo = live.logo, epg = live.epg, source = "$label·${live.name}", userAgent = ua)
                         }
                     }
                 }
-            } catch (_: Exception) { }
+            } catch (_: Throwable) { }
         }
         return out.distinctBy { it.url }
     }
@@ -185,25 +208,35 @@ class SourceCollector(private val context: Context) {
             .header("User-Agent", ua).header("Range", "bytes=0-4095").header("Accept", "*/*").build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return null
-            resp.body?.byteStream()?.use { s ->
-                val buf = ByteArray(4096); val n = s.read(buf)
-                if (n > 0) String(buf, 0, n, Charsets.UTF_8) else ""
-            }
+            SafeBody.readAscii(resp, 4096)
         }
-    } catch (_: Exception) { null }
+    } catch (_: Throwable) { null }
 
-    /** 抓取完整文本 */
+    /** 抓取完整文本（安全限制大小） */
     private fun fetchFull(url: String, ua: String): String? = try {
         val req = Request.Builder().url(url).header("User-Agent", ua).header("Accept", "*/*").build()
-        client.newCall(req).execute().use { resp -> if (resp.isSuccessful) resp.body?.string() else null }
-    } catch (_: Exception) { null }
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) null else SafeBody.readText(resp).text
+        }
+    } catch (_: Throwable) { null }
 
     /** 导入用户提供的文本（本地文件或粘贴内容）；TVBox 配置会走二次展开 */
     fun parseImported(text: String, label: String, configUrl: String? = null): List<Channel> {
-        if (TvBoxParser.isTvBoxConfig(text)) {
-            return expandTvBoxSync(text, configUrl ?: "", label, DEFAULT_UA)
-        }
-        return Parsers.parseAny(text, label)
+        return try {
+            if (TvBoxParser.isTvBoxConfig(text)) {
+                expandTvBoxSync(text, configUrl ?: "", label, DEFAULT_UA)
+            } else Parsers.parseAny(text, label)
+        } catch (_: Throwable) { emptyList() }
+    }
+
+    private fun safeReason(e: Throwable): String = when (e) {
+        is java.io.IOException -> "连接失败"
+        is OutOfMemoryError -> "响应过大"
+        else -> e.message?.take(40)?.ifBlank { "连接失败" } ?: "连接失败"
+    }
+
+    private fun safeProgress(cb: (CollectProgress) -> Unit, p: CollectProgress) {
+        try { cb(p) } catch (_: Throwable) {}
     }
 
     companion object {

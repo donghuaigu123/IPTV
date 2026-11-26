@@ -17,7 +17,8 @@ object Prefs {
     private inline fun <reified T> SharedPreferences.getJson(key: String, def: T): T = try {
         val raw = getString(key, null)
         if (raw.isNullOrBlank()) def else gson.fromJson(raw, object : TypeToken<T>() {}.type) ?: def
-    } catch (_: Exception) { def }
+    } catch (e: OutOfMemoryError) { def }
+      catch (_: Throwable) { def }
 
     // ---------------- 源配置 ----------------
     fun getSources(c: Context): MutableList<SourceConfig> {
@@ -49,7 +50,11 @@ object Prefs {
         SourceOrigin.decorate(ctx(c).getJson("channels", mutableListOf<Channel>())).toMutableList()
 
     fun saveChannels(c: Context, list: List<Channel>) {
-        ctx(c).edit().putString("channels", gson.toJson(SourceOrigin.decorate(list))).apply()
+        try {
+            ctx(c).edit().putString("channels", gson.toJson(SourceOrigin.decorate(list))).apply()
+        } catch (_: Throwable) {
+            // 极端情况下（列表过大/存储异常）写入失败，保留旧数据不崩溃
+        }
     }
 
     // ---------------- 已删除频道回收站 ----------------
@@ -58,7 +63,9 @@ object Prefs {
         SourceOrigin.decorate(ctx(c).getJson("recycle_bin", mutableListOf<Channel>())).toMutableList()
 
     fun saveRecycleBin(c: Context, list: List<Channel>) {
-        ctx(c).edit().putString("recycle_bin", gson.toJson(SourceOrigin.decorate(list))).apply()
+        try {
+            ctx(c).edit().putString("recycle_bin", gson.toJson(SourceOrigin.decorate(list))).apply()
+        } catch (_: Throwable) {}
     }
 
     /** 用户删除的频道唯一键（name+url），采集/导入时据此过滤，避免删了又被加回 */

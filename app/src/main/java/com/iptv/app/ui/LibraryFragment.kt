@@ -55,6 +55,9 @@ class LibraryFragment : Fragment() {
     private var currentOrigin = "all"   // all 或 SourceOrigin.OriginGroup.id
     private var manageMode = false
 
+    /** 视图是否存活，异步回调中据此判断是否可安全刷新 UI */
+    private val viewAlive: Boolean get() = isAdded && view != null
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val v = inflater.inflate(R.layout.fragment_library, container, false)
         etSearch = v.findViewById(R.id.etSearch)
@@ -103,15 +106,46 @@ class LibraryFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         reload()
+        consumePendingImport()
+    }
+
+    /** 处理外部 m3u/m3u8/http(s) 链接唤起：自动抓取并导入，成功后清空待办避免重复 */
+    private fun consumePendingImport() {
+        val url = PlaylistBus.pendingImportUrl ?: return
+        PlaylistBus.pendingImportUrl = null
+        if (!url.contains("://") || !viewAlive) return
+        val appCtx = requireContext().applicationContext
+        toast(appCtx, "正在导入外部直播源…")
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val text = withContext(Dispatchers.IO) { fetchText(url) }
+                if (text.isNullOrBlank()) {
+                    toast(appCtx, "外部源导入失败：无法获取内容")
+                    return@launch
+                }
+                val chans = SourceCollector(appCtx).parseImported(text, "外部:${url.take(30)}")
+                if (chans.isEmpty()) {
+                    toast(appCtx, "外部源导入失败：未识别到有效频道")
+                    return@launch
+                }
+                val merged = mergeChannels(appCtx, chans, Channel.ORIGIN_LIVE, url)
+                Prefs.saveChannels(appCtx, merged)
+                reload()
+                toast(appCtx, "已导入 ${chans.size} 个频道")
+            } catch (e: Throwable) {
+                toast(appCtx, "外部源导入异常：${e.message?.take(50) ?: "未知错误"}")
+            }
+        }
     }
 
     override fun onHiddenChanged(hidden: Boolean) {
         super.onHiddenChanged(hidden)
-        if (!hidden && isAdded) reload()
+        if (!hidden && viewAlive) reload()
     }
 
     private fun reload() {
-        allChannels = Prefs.getChannels(requireContext())
+        if (!viewAlive) return
+        allChannels = Prefs.getChannels(requireContext().applicationContext)
         allGroups = ChannelMerger.merge(allChannels)
         buildOriginChips()
         buildChips()
@@ -379,24 +413,25 @@ class LibraryFragment : Fragment() {
             val url = etUrl.text.toString().trim()
             if (!url.contains("://")) { Toast.makeText(ctx, "请输入有效地址", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
             dlg.dismiss()
-            lifecycleScope.launch {
+            val appCtx = ctx.applicationContext
+            viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val text = withContext(Dispatchers.IO) { fetchText(url) }
                     if (text.isNullOrBlank()) {
-                        Toast.makeText(ctx, "导入失败：无法获取内容", Toast.LENGTH_LONG).show()
+                        toast(appCtx, "导入失败：无法获取内容")
                     } else {
-                        val chans = SourceCollector(ctx).parseImported(text, "导入:${url.take(30)}")
+                        val chans = SourceCollector(appCtx).parseImported(text, "导入:${url.take(30)}")
                         if (chans.isEmpty()) {
-                            Toast.makeText(ctx, "导入失败：未识别到有效频道", Toast.LENGTH_LONG).show()
+                            toast(appCtx, "导入失败：未识别到有效频道")
                         } else {
-                            val merged = mergeChannels(ctx, chans, Channel.ORIGIN_LIVE, url)
-                            Prefs.saveChannels(ctx, merged)
+                            val merged = mergeChannels(appCtx, chans, Channel.ORIGIN_LIVE, url)
+                            Prefs.saveChannels(appCtx, merged)
                             reload()
-                            Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+                            toast(appCtx, "已导入 ${chans.size} 个频道")
                         }
                     }
-                } catch (e: Exception) {
-                    Toast.makeText(ctx, "导入异常：${e.message?.take(50)}", Toast.LENGTH_LONG).show()
+                } catch (e: Throwable) {
+                    toast(appCtx, "导入异常：${e.message?.take(50) ?: "未知错误"}")
                 }
             }
         }
@@ -424,8 +459,8 @@ class LibraryFragment : Fragment() {
                 reload()
                 dlg.dismiss()
                 Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(ctx, "导入异常：${e.message?.take(50)}", Toast.LENGTH_SHORT).show()
+            } catch (e: Throwable) {
+                toast(ctx.applicationContext, "导入异常：${e.message?.take(50) ?: "未知错误"}")
             }
         }
         dlg.show()
@@ -469,47 +504,57 @@ class LibraryFragment : Fragment() {
 
     /** 执行 TVBox 导入（URL 或文本），带进度提示 */
     private fun doTvBoxImport(url: String?, text: String?, label: String) {
+        if (!viewAlive) return
         val ctx = requireContext()
+        val appCtx = ctx.applicationContext
         val progress = AlertDialog.Builder(ctx).setTitle("正在导入 TVBox")
             .setMessage("正在展开直播订阅，请稍候…").setCancelable(false).create()
         progress.show()
-        lifecycleScope.launch {
+        // 关键：importer 的进度回调来自 IO 线程，必须 post 回主线程更新 Dialog，
+        // 否则 CalledFromWrongThreadException 直接闪退。
+        val progressUi: (String) -> Unit = { msg ->
+            if (activity != null) activity?.runOnUiThread {
+                try { if (progress.isShowing) progress.setMessage(msg) } catch (_: Throwable) {}
+            }
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val importer = TvBoxImporter(ctx.applicationContext)
+                val importer = TvBoxImporter(appCtx)
                 val result = if (url != null) {
                     importer.importFromUrl(url, label) { p ->
-                        progress.setMessage("${p.stage} ${p.done}/${p.total}\n${p.message}")
+                        progressUi("${p.stage} ${p.done}/${p.total}\n${p.message}")
                     }
                 } else {
                     importer.importFromText(text ?: "", url, label) { p ->
-                        progress.setMessage("${p.stage} ${p.done}/${p.total}\n${p.message}")
+                        progressUi("${p.stage} ${p.done}/${p.total}\n${p.message}")
                     }
                 }
                 withContext(Dispatchers.Main) {
-                    try { progress.dismiss() } catch (_: Exception) {}
+                    try { progress.dismiss() } catch (_: Throwable) {}
                     if (result.channels.isEmpty()) {
-                        Toast.makeText(ctx, "导入失败：未展开出可播放频道\n请检查配置地址是否有效", Toast.LENGTH_LONG).show()
+                        toast(appCtx, "导入失败：未展开出可播放频道\n请检查配置地址是否有效")
                     } else {
                         val merged = mergeChannels(
-                            ctx, result.channels, Channel.ORIGIN_TVBOX,
+                            appCtx, result.channels, Channel.ORIGIN_TVBOX,
                             url ?: "TVBox粘贴·${System.currentTimeMillis()}"
                         )
-                        Prefs.saveChannels(ctx, merged)
+                        Prefs.saveChannels(appCtx, merged)
                         reload()
-                        Toast.makeText(
-                            ctx,
-                            getString(R.string.tvbox_imported, result.channels.size, result.expandedCount),
-                            Toast.LENGTH_LONG
-                        ).show()
+                        toast(appCtx, "TVBox 导入完成：${result.channels.size} 个频道（展开 ${result.expandedCount} 路订阅）")
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 withContext(Dispatchers.Main) {
-                    try { progress.dismiss() } catch (_: Exception) {}
-                    Toast.makeText(ctx, "TVBox 导入异常：${e.message?.take(60)}", Toast.LENGTH_LONG).show()
+                    try { progress.dismiss() } catch (_: Throwable) {}
+                    toast(appCtx, "TVBox 导入异常：${e.message?.take(60) ?: "未知错误"}")
                 }
             }
         }
+    }
+
+    /** 用 applicationContext 弹 Toast，避免视图销毁后持有已泄漏的 Activity */
+    private fun toast(appCtx: Context, msg: String) {
+        try { Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show() } catch (_: Throwable) {}
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -517,7 +562,7 @@ class LibraryFragment : Fragment() {
         if (requestCode == REQ_IMPORT_FILE && resultCode == Activity.RESULT_OK) {
             val uri = data?.data ?: return
             val ctx = requireContext().applicationContext
-            lifecycleScope.launch {
+            viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val text = withContext(Dispatchers.IO) {
                         ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
@@ -525,16 +570,16 @@ class LibraryFragment : Fragment() {
                     if (!text.isNullOrBlank()) {
                         val chans = SourceCollector(ctx).parseImported(text, "文件导入")
                         if (chans.isEmpty()) {
-                            Toast.makeText(ctx, "未识别到有效频道", Toast.LENGTH_SHORT).show()
+                            toast(ctx, "未识别到有效频道")
                         } else {
                             val merged = mergeChannels(ctx, chans, Channel.ORIGIN_LIVE, "文件·${uri.lastPathSegment ?: System.currentTimeMillis()}")
                             Prefs.saveChannels(ctx, merged)
                             reload()
-                            Toast.makeText(ctx, getString(R.string.playlist_imported, chans.size), Toast.LENGTH_SHORT).show()
+                            toast(ctx, "已导入 ${chans.size} 个频道")
                         }
                     }
-                } catch (e: Exception) {
-                    Toast.makeText(ctx, "文件导入失败：${e.message?.take(50)}", Toast.LENGTH_SHORT).show()
+                } catch (e: Throwable) {
+                    toast(ctx, "文件导入失败：${e.message?.take(50) ?: "未知错误"}")
                 }
             }
         }
@@ -544,8 +589,10 @@ class LibraryFragment : Fragment() {
         val client = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
         val req = Request.Builder().url(url).header("User-Agent", SourceCollector.DEFAULT_UA).build()
-        client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string() else null }
-    } catch (e: Exception) { null }
+        client.newCall(req).execute().use {
+            if (it.isSuccessful) com.iptv.app.core.SafeBody.readText(it).text else null
+        }
+    } catch (e: Throwable) { null }
 
     /**
      * 以频道组为单位打开播放器。

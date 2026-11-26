@@ -49,6 +49,9 @@ class CollectorFragment : Fragment() {
     private var collector: SourceCollector? = null
     private var job: Job? = null
 
+    /** 视图是否仍然存活。Fragment 切到后台/移除后 isAdded 可能仍为 true，但视图已销毁 */
+    private val viewAlive: Boolean get() = isAdded && view != null
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val v = inflater.inflate(R.layout.fragment_collect, container, false)
         btnCollect = v.findViewById(R.id.btnCollect)
@@ -157,9 +160,11 @@ class CollectorFragment : Fragment() {
     }
 
     private fun startCollect() {
+        if (!viewAlive) return
         val ctx = requireContext().applicationContext
         job?.cancel()
-        job = lifecycleScope.launch {
+        job = viewLifecycleOwner.lifecycleScope.launch {
+            if (!viewAlive) return@launch
             btnCollect.isEnabled = false
             swipe.isRefreshing = true
             try {
@@ -190,10 +195,10 @@ class CollectorFragment : Fragment() {
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 用户主动取消，正常退出
-            } catch (e: Exception) {
-                safeToast(ctx, "采集失败：${e.message?.take(50)}")
+            } catch (e: Throwable) {
+                safeToast(ctx, "采集失败：${e.message?.take(50) ?: "未知错误"}")
             } finally {
-                if (isAdded) {
+                if (viewAlive) {
                     btnCollect.isEnabled = true
                     swipe.isRefreshing = false
                 }
@@ -202,6 +207,7 @@ class CollectorFragment : Fragment() {
     }
 
     private fun startCheck() {
+        if (!viewAlive) return
         val ctx = requireContext().applicationContext
         val channels = Prefs.getChannels(ctx)
         if (channels.isEmpty()) {
@@ -209,7 +215,7 @@ class CollectorFragment : Fragment() {
             return
         }
         job?.cancel()
-        job = lifecycleScope.launch { doCheck(ctx) }
+        job = viewLifecycleOwner.lifecycleScope.launch { doCheck(ctx) }
     }
 
     /**
@@ -218,7 +224,7 @@ class CollectorFragment : Fragment() {
      *              采集后的自动检测只传本次采集频道，确保清理无效源时不误删手动导入的直播源 / TVBox源。
      */
     private suspend fun doCheck(ctx: android.content.Context, scope: Set<String>? = null) {
-        if (!isAdded) return
+        if (!viewAlive) return
         btnCheck.isEnabled = false
         try {
             val all = Prefs.getChannels(ctx)
@@ -253,10 +259,10 @@ class CollectorFragment : Fragment() {
             }
             updateSummary()
         } catch (e: kotlinx.coroutines.CancellationException) {
-        } catch (e: Exception) {
-            safeToast(ctx, "检测失败：${e.message?.take(50)}")
+        } catch (e: Throwable) {
+            safeToast(ctx, "检测失败：${e.message?.take(50) ?: "未知错误"}")
         } finally {
-            if (isAdded) btnCheck.isEnabled = true
+            if (viewAlive) btnCheck.isEnabled = true
         }
     }
 
@@ -264,7 +270,7 @@ class CollectorFragment : Fragment() {
     private fun safeToast(ctx: android.content.Context, msg: String) {
         val activity = activity ?: return
         activity.runOnUiThread {
-            try { Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show() } catch (_: Exception) {}
+            try { Toast.makeText(ctx.applicationContext, msg, Toast.LENGTH_SHORT).show() } catch (_: Throwable) {}
         }
     }
 
@@ -273,21 +279,20 @@ class CollectorFragment : Fragment() {
      * 否则会抛 CalledFromWrongThreadException 导致闪退。
      */
     private fun updateProgress(p: CollectProgress) {
-        if (!isAdded || context == null) return
         val activity = activity ?: return
         activity.runOnUiThread {
-            if (!isAdded || context == null) return@runOnUiThread
+            if (!viewAlive) return@runOnUiThread
             try {
                 tvProgress.text = "${p.stage} · ${p.message}"
                 if (p.total > 0) progressBar.progress = (p.done * 100 / p.total).coerceIn(0, 100)
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
         }
     }
 
     private fun updateSummary() {
-        if (!isAdded || context == null) return
+        if (!viewAlive) return
         try {
-            val ctx = requireContext()
+            val ctx = requireContext().applicationContext
             val list = Prefs.getChannels(ctx)
             val ok = list.count { it.isOk }
             val fail = list.count { it.status == com.iptv.app.model.Channel.STATUS_FAIL }
@@ -295,7 +300,7 @@ class CollectorFragment : Fragment() {
             tvStatOk.text = ok.toString()
             tvStatSources.text = Prefs.getSources(ctx).count { it.enabled }.toString()
             tvSummary.text = "共 ${list.size} 个频道 · 可用 $ok · 失效 $fail"
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     /** 展示每个数据源的采集诊断信息 */
@@ -362,17 +367,17 @@ class CollectorFragment : Fragment() {
             chooseDir()
             return
         }
-        lifecycleScope.launch {
+        viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val result = Exporter(ctx).export(channels, format)
                 result.fold(
                     onSuccess = { uri ->
                         safeToast(ctx, "已导出 ${channels.size} 个有效源：${uri.lastPathSegment ?: "文件"}")
                     },
-                    onFailure = { e -> safeToast(ctx, getString(R.string.export_fail, e.message ?: "未知错误")) }
+                    onFailure = { e -> safeToast(ctx, "导出失败：${e.message?.take(50) ?: "未知错误"}") }
                 )
-            } catch (e: Exception) {
-                safeToast(ctx, "导出异常：${e.message?.take(50)}")
+            } catch (e: Throwable) {
+                safeToast(ctx, "导出异常：${e.message?.take(50) ?: "未知错误"}")
             }
         }
     }

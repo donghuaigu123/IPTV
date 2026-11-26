@@ -8,12 +8,14 @@ import com.iptv.app.model.TvBoxLive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.IDN
-import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * TVBox 配置导入器（v1.6 核心修复）。
@@ -48,7 +50,7 @@ class TvBoxImporter(private val context: Context) {
         label: String,
         onProgress: (CollectProgress) -> Unit
     ): ImportResult = withContext(Dispatchers.IO) {
-        val lives = TvBoxParser.parseLives(text)
+        val lives = try { TvBoxParser.parseLives(text) } catch (_: Throwable) { emptyList() }
         if (lives.isEmpty()) {
             return@withContext ImportResult(emptyList(), 0, 0, 0, emptyList())
         }
@@ -67,10 +69,10 @@ class TvBoxImporter(private val context: Context) {
             ?: return@withContext ImportResult(emptyList(), 0, 0, 0, listOf(configUrl))
         if (!TvBoxParser.isTvBoxConfig(text)) {
             // 也可能用户填的本身就是订阅列表或 m3u，直接当普通源解析
-            val chans = Parsers.parseAny(text, label)
+            val chans = try { Parsers.parseAny(text, label) } catch (_: Throwable) { emptyList() }
             return@withContext ImportResult(chans, 0, 0, 0, emptyList())
         }
-        val lives = TvBoxParser.parseLives(text)
+        val lives = try { TvBoxParser.parseLives(text) } catch (_: Throwable) { emptyList() }
         if (lives.isEmpty()) {
             return@withContext ImportResult(emptyList(), 0, 0, 0, emptyList())
         }
@@ -84,85 +86,93 @@ class TvBoxImporter(private val context: Context) {
         label: String,
         onProgress: (CollectProgress) -> Unit
     ): ImportResult = withContext(Dispatchers.IO) {
-        val sem = Semaphore(8)
         val total = lives.size
-        var done = 0
+        if (total == 0) return@withContext ImportResult(emptyList(), 0, 0, 0, emptyList())
+        val concurrency = minOf(8, total)
+        val sem = Semaphore(concurrency)
+        val done = AtomicInteger(0)
         val failed = java.util.Collections.synchronizedList(mutableListOf<String>())
 
         // each: 第一条 = 频道列表，第二条 = 是否为展开的订阅(true)/直接流(false)
-        val results = lives.map { live ->
+        val results = arrayOfNulls<Pair<List<Channel>, Boolean>>(total)
+        val workers = (0 until concurrency).map { workerId ->
             async {
-                sem.acquire()
-                try {
-                    val resolved = TvBoxParser.resolveUrl(live.url, configUrl)
-                    if (resolved == null) {
-                        failed.add(live.url)
-                        Pair(emptyList<Channel>(), false)
-                    } else {
-                        val ua = live.ua.ifBlank { SourceCollector.DEFAULT_UA }
-                        // 先取一小段样本判断类型（ DIRECT 直接流 / PLAYLIST 订阅列表 ）
-                        val sample = fetchSample(resolved, ua)
-                        val kind = TvBoxParser.detectContentKind(resolved, sample)
-                        val pair: Pair<List<Channel>, Boolean> = when (kind) {
-                            TvBoxParser.ContentKind.DIRECT ->
-                                Pair(listOf(toChannel(live, resolved, label, ua)), false)
-                            TvBoxParser.ContentKind.PLAYLIST -> {
-                                val full = sample?.let { if (it.length >= 4096) it else fetch(resolved, ua) } ?: fetch(resolved, ua)
-                                if (full.isNullOrBlank()) {
-                                    failed.add(live.url)
-                                    Pair(emptyList(), true)
-                                } else {
-                                    val chans = Parsers.parseAny(full, label).map { ch ->
-                                        ch.copy(
-                                            group = ch.group.ifBlank { live.group.ifBlank { live.name } },
-                                            logo = ch.logo.ifBlank { live.logo },
-                                            epg = ch.epg.ifBlank { live.epg },
-                                            source = "$label·${live.name}",
-                                            userAgent = ua
-                                        )
+                var index = workerId
+                while (index < total) {
+                    val live = lives[index]
+                    sem.withPermit {
+                        val pair: Pair<List<Channel>, Boolean> = try {
+                            val resolved = TvBoxParser.resolveUrl(live.url, configUrl)
+                            if (resolved == null) {
+                                failed.add(live.url)
+                                Pair(emptyList<Channel>(), false)
+                            } else {
+                                val ua = live.ua.ifBlank { SourceCollector.DEFAULT_UA }
+                                val sample = fetchSample(resolved, ua)
+                                val kind = TvBoxParser.detectContentKind(resolved, sample)
+                                when (kind) {
+                                    TvBoxParser.ContentKind.DIRECT ->
+                                        Pair(listOf(toChannel(live, resolved, label, ua)), false)
+                                    TvBoxParser.ContentKind.PLAYLIST -> {
+                                        val full = sample?.let { if (it.length >= 4096) it else fetch(resolved, ua) } ?: fetch(resolved, ua)
+                                        if (full.isNullOrBlank()) {
+                                            failed.add(live.url)
+                                            Pair(emptyList(), true)
+                                        } else {
+                                            val chans = try {
+                                                Parsers.parseAny(full, label).map { ch ->
+                                                    ch.copy(
+                                                        group = ch.group.ifBlank { live.group.ifBlank { live.name } },
+                                                        logo = ch.logo.ifBlank { live.logo },
+                                                        epg = ch.epg.ifBlank { live.epg },
+                                                        source = "$label·${live.name}",
+                                                        userAgent = ua
+                                                    )
+                                                }
+                                            } catch (_: Throwable) { emptyList() }
+                                            Pair(chans, true)
+                                        }
                                     }
-                                    Pair(chans, true)
+                                    TvBoxParser.ContentKind.UNKNOWN -> {
+                                        if (resolved.lowercase().let {
+                                                it.contains(".m3u8") || it.contains(".flv") ||
+                                                it.contains(".mp4") || it.startsWith("rtmp")
+                                            }) {
+                                            Pair(listOf(toChannel(live, resolved, label, ua)), false)
+                                        } else {
+                                            failed.add(live.url)
+                                            Pair(emptyList(), true)
+                                        }
+                                    }
                                 }
                             }
-                            TvBoxParser.ContentKind.UNKNOWN -> {
-                                // 拿不准时按 URL 后缀兜底：像流就直接建频道，让用户可尝试
-                                if (resolved.lowercase().let {
-                                        it.contains(".m3u8") || it.contains(".flv") ||
-                                        it.contains(".mp4") || it.startsWith("rtmp")
-                                    }) {
-                                    Pair(listOf(toChannel(live, resolved, label, ua)), false)
-                                } else {
-                                    failed.add(live.url)
-                                    Pair(emptyList(), true)
-                                }
-                            }
+                        } catch (_: Throwable) {
+                            failed.add(live.url)
+                            Pair(emptyList(), false)
                         }
-                        done++
-                        if (done % 2 == 0 || done == total) {
-                            onProgress(CollectProgress("展开 TVBox 订阅", done, total, "${live.name} · ${pair.first.size} 个频道"))
+                        results[index] = pair
+                        val d = done.incrementAndGet()
+                        if (d % 2 == 0 || d == total) {
+                            safeProgress(onProgress, CollectProgress("展开 TVBox 订阅", d, total, "${live.name} · ${pair.first.size} 个频道"))
                         }
-                        pair
                     }
-                } catch (_: Exception) {
-                    failed.add(live.url)
-                    done++
-                    Pair(emptyList(), false)
-                } finally {
-                    sem.release()
+                    index += concurrency
                 }
             }
-        }.awaitAll()
+        }
+        workers.awaitAll()
 
-        val flat = results.flatMap { it.first }
+        val flat = results.filterNotNull().flatMap { it.first }
             .filter { it.url.contains("://") }
             .distinctBy { it.url }
 
-        onProgress(CollectProgress("导入完成", total, total, "共 ${flat.size} 个可播放频道"))
+        safeProgress(onProgress, CollectProgress("导入完成", total, total, "共 ${flat.size} 个可播放频道"))
+        val validResults = results.filterNotNull()
         ImportResult(
             channels = flat,
             liveCount = total,
-            expandedCount = results.count { it.second && it.first.isNotEmpty() },
-            directCount = results.count { !it.second && it.first.isNotEmpty() },
+            expandedCount = validResults.count { it.second && it.first.isNotEmpty() },
+            directCount = validResults.count { !it.second && it.first.isNotEmpty() },
             failedUrls = failed.toList()
         )
     }
@@ -187,15 +197,11 @@ class TvBoxImporter(private val context: Context) {
             .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return null
-            resp.body?.byteStream()?.use { stream ->
-                val buf = ByteArray(4096)
-                val n = stream.read(buf)
-                if (n > 0) String(buf, 0, n, Charsets.UTF_8) else ""
-            }
+            SafeBody.readAscii(resp, 4096)
         }
-    } catch (_: Exception) { null }
+    } catch (_: Throwable) { null }
 
-    /** 抓取完整内容 */
+    /** 抓取完整内容（安全限制大小） */
     private fun fetch(url: String, ua: String): String? = try {
         val req = Request.Builder()
             .url(normalizeUrl(url))
@@ -203,10 +209,13 @@ class TvBoxImporter(private val context: Context) {
             .header("Accept", "*/*")
             .build()
         client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return null
-            resp.body?.string()
+            if (!resp.isSuccessful) null else SafeBody.readText(resp).text
         }
-    } catch (_: Exception) { null }
+    } catch (_: Throwable) { null }
+
+    private fun safeProgress(cb: (CollectProgress) -> Unit, p: CollectProgress) {
+        try { cb(p) } catch (_: Throwable) {}
+    }
 
     /** 中文域名转 punycode，避免 okhttp 解析失败 */
     private fun normalizeUrl(url: String): String = try {
