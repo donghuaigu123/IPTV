@@ -67,6 +67,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var bottomBar: LinearLayout
     private lateinit var seekBar: SeekBar
     private lateinit var btnPlayPause: ImageButton
+    private lateinit var btnUnlock: ImageButton
 
     /** 频道组列表（合并后的频道，每组含 N 条线路） */
     private var groups: List<ChannelGroup> = emptyList()
@@ -92,6 +93,8 @@ class PlayerActivity : AppCompatActivity() {
         private const val CONNECT_TIMEOUT_MS = 8000L
         /** HTTP 底层连接/读取超时，与上面的兜底对齐，避免底层卡满 15 秒 */
         private const val HTTP_TIMEOUT_MS = 8000
+        /** 控制栏无操作后自动隐藏的延时；避免上下按钮栏长期遮挡画面 */
+        private const val CONTROL_HIDE_DELAY_MS = 3500L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -131,6 +134,12 @@ class PlayerActivity : AppCompatActivity() {
     private val hideHintTask = Runnable {
         if (!playerReleased && !isFinishing && !isDestroyed) tvCenterHint.visibility = View.GONE
     }
+
+    /** 控制栏无操作后自动隐藏，避免上下按钮栏长期遮挡视线 */
+    private val hideControlsTask = Runnable {
+        if (!playerReleased && !isFinishing && !isDestroyed && !locked) hideControls()
+    }
+
 
     private fun showFailureHint(text: String) {
         handler.removeCallbacks(hideHintTask)
@@ -180,10 +189,13 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         setupControls()
+        setupBackPressed()
         setupGestures()
         playCurrentLine()
 
         handler.post(updateTask)
+        // 兜底：即便流未进入 READY（如直播),几秒后也隐藏控制栏，避免按钮栏一直遮挡画面
+        scheduleHideControls()
     }
 
     private fun findViews() {
@@ -197,6 +209,7 @@ class PlayerActivity : AppCompatActivity() {
         bottomBar = findViewById(R.id.bottomBar)
         seekBar = findViewById(R.id.seekBar)
         btnPlayPause = findViewById(R.id.btnPlayPause)
+        btnUnlock = findViewById(R.id.btnUnlock)
     }
 
     private fun setupDrawer() {
@@ -277,6 +290,8 @@ class PlayerActivity : AppCompatActivity() {
                                     handler.removeCallbacks(hideHintTask)
                                     tvCenterHint.visibility = View.GONE
                                     updateTime()
+                                    // 视频真正开始播放后，延时自动隐藏控制栏，画面无遮挡
+                                    scheduleHideControls()
                                 }
                                 Player.STATE_ENDED -> { tvCenterHint.apply { text = "播放结束"; visibility = View.VISIBLE } }
                             }
@@ -312,9 +327,8 @@ class PlayerActivity : AppCompatActivity() {
                 })
             }
         playerView.player = player
-        playerView.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { vis ->
-            controlsVisible = vis == View.VISIBLE
-        })
+        // 使用自定义控制栏（use_controller=false），controlsVisible 完全由 show/hideControls 维护，
+        // 不接入 PlayerView 自带 controller 监听器以免状态错乱。
     }
 
     /** 播放当前组的当前线路 */
@@ -468,12 +482,8 @@ class PlayerActivity : AppCompatActivity() {
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<View>(R.id.btnList).setOnClickListener { drawer.openDrawer(GravityCompat.START) }
         tvLineBadge.setOnClickListener { showLinePicker() }
-        findViewById<View>(R.id.btnLock).setOnClickListener {
-            locked = !locked
-            topBar.visibility = if (locked) View.GONE else View.VISIBLE
-            bottomBar.visibility = if (locked) View.GONE else View.VISIBLE
-            Toast.makeText(this, if (locked) "已锁定屏幕" else "已解锁", Toast.LENGTH_SHORT).show()
-        }
+        findViewById<View>(R.id.btnLock).setOnClickListener { lockScreen() }
+        btnUnlock.setOnClickListener { unlockScreen() }
         findViewById<View>(R.id.btnMore).setOnClickListener { showMoreMenu() }
         btnPlayPause.setOnClickListener { togglePlay() }
         findViewById<View>(R.id.btnPrev).setOnClickListener { switchChannel(-1) }
@@ -497,6 +507,21 @@ class PlayerActivity : AppCompatActivity() {
                     val p = sb?.progress ?: 0
                     if (player.duration > 0) player.seekTo(player.duration * p / 1000)
                 } catch (_: Exception) {}
+                scheduleHideControls()
+            }
+        })
+    }
+
+    /** 返回键：锁定时先解锁，解锁后才真正退出（用官方 Dispatcher，兼容 Android 13+） */
+    private fun setupBackPressed() {
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (locked) {
+                    unlockScreen()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
             }
         })
     }
@@ -504,12 +529,20 @@ class PlayerActivity : AppCompatActivity() {
     private fun setupGestures() {
         val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                if (locked) return true
+                if (locked) {
+                    // 锁定时单击：提示解锁方式（解锁按钮常驻显示，随时可点）
+                    Toast.makeText(this@PlayerActivity, "点击右侧锁图标或双击画面解锁", Toast.LENGTH_SHORT).show()
+                    return true
+                }
                 toggleControls()
                 return true
             }
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                if (locked) return true
+                if (locked) {
+                    // 锁定时双击画面直接解锁，提供便捷入口
+                    unlockScreen()
+                    return true
+                }
                 togglePlay()
                 return true
             }
@@ -553,7 +586,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
                 MotionEvent.ACTION_UP -> {
                     tvCenterHint.visibility = View.GONE
-                    handler.postDelayed({ if (!locked) hideControls() }, 3000)
+                    if (!locked) scheduleHideControls()
                 }
             }
             false
@@ -620,15 +653,47 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun showControls() {
+        if (playerReleased || isFinishing || isDestroyed) return
         controlsVisible = true
         topBar.visibility = View.VISIBLE
         bottomBar.visibility = View.VISIBLE
+        scheduleHideControls()
     }
 
     private fun hideControls() {
         controlsVisible = false
         topBar.visibility = View.GONE
         bottomBar.visibility = View.GONE
+        handler.removeCallbacks(hideControlsTask)
+    }
+
+    /** 控制栏显示后延时自动隐藏；锁定状态或用户正在拖动进度时不隐藏 */
+    private fun scheduleHideControls() {
+        if (playerReleased || isFinishing || isDestroyed) return
+        handler.removeCallbacks(hideControlsTask)
+        if (locked || isSeeking || !controlsVisible) return
+        handler.postDelayed(hideControlsTask, CONTROL_HIDE_DELAY_MS)
+    }
+
+    /** 锁定：隐藏全部控制栏，仅保留独立的悬浮解锁按钮（位于画面右侧，不受 topBar 影响） */
+    private fun lockScreen() {
+        if (locked) return
+        locked = true
+        hideControls()
+        btnUnlock.visibility = View.VISIBLE
+        Toast.makeText(this, "已锁定屏幕 · 点击右侧锁图标或双击画面解锁", Toast.LENGTH_LONG).show()
+    }
+
+    /** 解锁：恢复控制栏并调度自动隐藏 */
+    private fun unlockScreen() {
+        if (!locked) return
+        locked = false
+        btnUnlock.visibility = View.GONE
+        controlsVisible = true
+        topBar.visibility = View.VISIBLE
+        bottomBar.visibility = View.VISIBLE
+        scheduleHideControls()
+        Toast.makeText(this, "已解锁", Toast.LENGTH_SHORT).show()
     }
 
     private fun getVolume(): Float {
@@ -781,9 +846,14 @@ class PlayerActivity : AppCompatActivity() {
         else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
 
-    override fun onPictureInPictureModeChanged(isInPic: Boolean) {
-        super.onPictureInPictureModeChanged(isInPic)
-        if (isInPic) hideControls() else showControls()
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode)
+        if (isInPictureInPictureMode) {
+            handler.removeCallbacks(hideControlsTask)
+            hideControls()
+        } else if (!locked) {
+            showControls()
+        }
     }
 
     override fun onStop() {
@@ -801,6 +871,7 @@ class PlayerActivity : AppCompatActivity() {
         handler.removeCallbacks(switchTimeoutTask)
         handler.removeCallbacks(retryTask)
         handler.removeCallbacks(hideHintTask)
+        handler.removeCallbacks(hideControlsTask)
         try {
             if (::player.isInitialized) {
                 playerView.player = null

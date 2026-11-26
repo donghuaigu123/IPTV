@@ -11,8 +11,8 @@ android {
         applicationId = "com.iptv.app"
         minSdk = 21
         targetSdk = 34
-        versionCode = 14
-        versionName = "2.0.3"
+        versionCode = 15
+        versionName = "2.0.4"
         vectorDrawables.useSupportLibrary = true
     }
 
