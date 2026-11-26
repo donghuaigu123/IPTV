@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -95,6 +94,8 @@ class PlayerActivity : AppCompatActivity() {
         private const val HTTP_TIMEOUT_MS = 8000
         /** 控制栏无操作后自动隐藏的延时；避免上下按钮栏长期遮挡画面 */
         private const val CONTROL_HIDE_DELAY_MS = 3500L
+        /** 长按画面显示频道详情的判定时长 */
+        private const val LONG_PRESS_TIMEOUT = 500L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -107,7 +108,12 @@ class PlayerActivity : AppCompatActivity() {
     private var gestureMode = 0 // 1=音量 2=亮度 3=进度
     private var touchStartY = 0f
     private var touchStartX = 0f
+    private var touchStartTime = 0L
     private var playerReleased = false
+    /** 单击判定：用时间戳自主区分单击/双击，避免 GestureDetector 回调不可靠导致控制栏无法唤回 */
+    private var lastTapTime = 0L
+    private val doubleTapTimeout = 300L
+    private var longPressFired = false
 
     private val updateTask = object : Runnable {
         override fun run() {
@@ -140,6 +146,24 @@ class PlayerActivity : AppCompatActivity() {
         if (!playerReleased && !isFinishing && !isDestroyed && !locked) hideControls()
     }
 
+    /** 单击判定：短暂等待，若期间没有第二击则切换控制栏 */
+    private val singleTapTask = Runnable {
+        if (playerReleased || isFinishing || isDestroyed) return@Runnable
+        if (locked) {
+            Toast.makeText(this@PlayerActivity, "点击右侧锁图标或双击画面解锁", Toast.LENGTH_SHORT).show()
+        } else {
+            toggleControls()
+        }
+    }
+
+    /** 长按判定：按住画面显示频道详情 */
+    private val longPressTask = Runnable {
+        if (playerReleased || isFinishing || isDestroyed || locked) return@Runnable
+        if (gestureMode == 0) {
+            showChannelInfo()
+            longPressFired = true
+        }
+    }
 
     private fun showFailureHint(text: String) {
         handler.removeCallbacks(hideHintTask)
@@ -526,70 +550,95 @@ class PlayerActivity : AppCompatActivity() {
         })
     }
 
+    /**
+     * 触摸交互（对齐主流播放器逻辑）：
+     * - 单击：切换控制栏显示/隐藏（隐藏后点击可随时唤回短暂控制栏）。
+     * - 双击：播放/暂停（锁定时双击解锁）。
+     * - 上下滑动：左半屏调亮度、右半屏调音量；左右滑动：调整进度。
+     * - 长按：显示频道详情。
+     * 关键点：监听器返回 true 完全接管触摸，保证 ACTION_UP 可靠到达；
+     * 用时间戳自主区分单击/双击，不依赖 GestureDetector 回调（后者不稳定且易被误判为双击）。
+     */
     private fun setupGestures() {
-        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                if (locked) {
-                    // 锁定时单击：提示解锁方式（解锁按钮常驻显示，随时可点）
-                    Toast.makeText(this@PlayerActivity, "点击右侧锁图标或双击画面解锁", Toast.LENGTH_SHORT).show()
-                    return true
-                }
-                toggleControls()
-                return true
-            }
-            override fun onDoubleTap(e: MotionEvent): Boolean {
-                if (locked) {
-                    // 锁定时双击画面直接解锁，提供便捷入口
-                    unlockScreen()
-                    return true
-                }
-                togglePlay()
-                return true
-            }
-            override fun onLongPress(e: MotionEvent) {
-                if (locked) return
-                showChannelInfo()
-            }
-        })
-
         playerView.setOnTouchListener { _, event ->
-            detector.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    touchStartX = event.x; touchStartY = event.y
+                    touchStartX = event.x
+                    touchStartY = event.y
+                    touchStartTime = System.currentTimeMillis()
                     volumeStart = getVolume()
                     seekStart = if (!playerReleased && ::player.isInitialized) {
                         try { player.currentPosition } catch (_: Exception) { 0L }
                     } else 0L
                     gestureMode = 0
+                    longPressFired = false
+                    handler.removeCallbacks(singleTapTask)
+                    handler.removeCallbacks(longPressTask)
+                    handler.postDelayed(longPressTask, LONG_PRESS_TIMEOUT)
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (locked) return@setOnTouchListener false
                     val dx = event.x - touchStartX
                     val dy = event.y - touchStartY
+                    // 超过阈值才认定为滑动，避免轻微抖动被当成手势
                     if (gestureMode == 0 && (abs(dx) > 40 || abs(dy) > 40)) {
-                        gestureMode = if (abs(dx) > abs(dy)) 3 else if (event.y < resources.displayMetrics.heightPixels / 2) 2 else 1
+                        gestureMode = if (abs(dx) > abs(dy)) 3
+                        else if (event.y < resources.displayMetrics.heightPixels / 2) 2 else 1
+                        // 一旦滑动，取消待判定的单击与长按
+                        handler.removeCallbacks(singleTapTask)
+                        handler.removeCallbacks(longPressTask)
                     }
-                    when (gestureMode) {
-                        1 -> setVolume(volumeStart - dy / 200f)
-                        2 -> setBrightness(brightness - dy / 400f)
-                        3 -> {
-                            if (playerReleased || !::player.isInitialized) return@setOnTouchListener false
-                            try {
-                                val dur = if (player.duration > 0) player.duration else 60_000L
-                                val target = (seekStart + dx / 4 * 1000).toLong().coerceIn(0, dur)
-                                player.seekTo(target)
-                                tvCenterHint.apply { text = "快进到 ${fmt(target)}"; visibility = View.VISIBLE }
-                            } catch (_: Exception) {}
+                    if (!locked) {
+                        when (gestureMode) {
+                            1 -> setVolume(volumeStart - dy / 200f)
+                            2 -> setBrightness(brightness - dy / 400f)
+                            3 -> {
+                                if (!playerReleased && ::player.isInitialized) {
+                                    try {
+                                        val dur = if (player.duration > 0) player.duration else 60_000L
+                                        val target = (seekStart + dx / 4 * 1000).toLong().coerceIn(0, dur)
+                                        player.seekTo(target)
+                                        tvCenterHint.apply { text = "快进到 ${fmt(target)}"; visibility = View.VISIBLE }
+                                    } catch (_: Exception) {}
+                                }
+                            }
                         }
+                        // 滑动操作后重新唤出控制栏并计时隐藏，方便用户看到进度反馈
+                        if (gestureMode != 0 && !controlsVisible) showControls()
                     }
+                    true
                 }
                 MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(longPressTask)
                     tvCenterHint.visibility = View.GONE
-                    if (!locked) scheduleHideControls()
+                    val duration = System.currentTimeMillis() - touchStartTime
+                    // 长按已处理或发生滑动时不再当作点击
+                    if (!longPressFired && gestureMode == 0 && duration < LONG_PRESS_TIMEOUT) {
+                        // 未滑动且非长按：判定单击 or 双击
+                        val now = System.currentTimeMillis()
+                        if (now - lastTapTime < doubleTapTimeout) {
+                            // 双击：取消待执行的单击，执行播放/暂停（或解锁）
+                            handler.removeCallbacks(singleTapTask)
+                            lastTapTime = 0L
+                            if (locked) unlockScreen() else togglePlay()
+                        } else {
+                            lastTapTime = now
+                            // 单击延迟执行，等待可能的第二击
+                            handler.postDelayed(singleTapTask, doubleTapTimeout)
+                        }
+                    } else if (!locked) {
+                        scheduleHideControls()
+                    }
+                    true
                 }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(singleTapTask)
+                    handler.removeCallbacks(longPressTask)
+                    tvCenterHint.visibility = View.GONE
+                    true
+                }
+                else -> true
             }
-            false
         }
     }
 
@@ -872,6 +921,8 @@ class PlayerActivity : AppCompatActivity() {
         handler.removeCallbacks(retryTask)
         handler.removeCallbacks(hideHintTask)
         handler.removeCallbacks(hideControlsTask)
+        handler.removeCallbacks(singleTapTask)
+        handler.removeCallbacks(longPressTask)
         try {
             if (::player.isInitialized) {
                 playerView.player = null
