@@ -1,6 +1,7 @@
 package com.iptv.app.core
 
 import okhttp3.Response
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 
 /**
@@ -21,23 +22,23 @@ object SafeBody {
      */
     fun readText(resp: Response, maxBytes: Int = DEFAULT_MAX_BYTES): Result {
         val body = resp.body ?: return Result("", false)
-        val out = StringBuilder()
-        var total = 0
+        // 先按原始字节收集，最后一次性解码：
+        // 分块 String(buf,...) 会在多字节字符恰好跨块时被截断成乱码，这是频道名乱码的元凶之一。
+        val out = ByteArrayOutputStream(minOf(maxBytes, 8192))
         var truncated = false
         try {
             body.byteStream().use { stream ->
                 val buf = ByteArray(8192)
                 while (true) {
-                    val want = minOf(buf.size, maxBytes - total)
+                    val want = minOf(buf.size, maxBytes - out.size())
                     if (want <= 0) { truncated = true; break }
                     val n = stream.read(buf, 0, want)
                     if (n < 0) break
                     if (n == 0) break
-                    out.append(String(buf, 0, n, Charsets.UTF_8))
-                    total += n
+                    out.write(buf, 0, n)
                 }
                 // 探测是否还有更多数据（只读 1 字节，不真正加载全文）
-                if (!truncated && total >= maxBytes) {
+                if (!truncated && out.size() >= maxBytes) {
                     truncated = try { stream.read() >= 0 } catch (_: Throwable) { false }
                 }
             }
@@ -46,27 +47,30 @@ object SafeBody {
         } catch (_: OutOfMemoryError) {
             return Result("", true)
         }
-        return Result(out.toString(), truncated)
+        val text = try { TextEncoding.decode(out.toByteArray()) } catch (_: Throwable) { String(out.toByteArray(), Charsets.UTF_8) }
+        return Result(text, truncated)
     }
 
-    /** 以 Latin-1 读取探测样本（用于判断内容特征的 ASCII 头部） */
+    /**
+     * 读取探测样本（用于判断内容特征的 ASCII 头部）。
+     * v2.0.2：改为与正文一致的智能解码 —— 该样本在样本足够大时会被直接当作正文解析，
+     * 若继续用 Latin-1 解码，中文频道名会变成「GOé å」乱码。
+     */
     fun readAscii(resp: Response, maxBytes: Int): String {
         val body = resp.body ?: return ""
-        val out = StringBuilder()
-        var total = 0
+        val out = ByteArrayOutputStream(minOf(maxBytes, 8192))
         try {
             body.byteStream().use { stream ->
                 val buf = ByteArray(8192)
-                while (total < maxBytes) {
-                    val want = minOf(buf.size, maxBytes - total)
+                while (out.size() < maxBytes) {
+                    val want = minOf(buf.size, maxBytes - out.size())
                     val n = stream.read(buf, 0, want)
                     if (n <= 0) break
-                    out.append(String(buf, 0, n, Charsets.ISO_8859_1))
-                    total += n
+                    out.write(buf, 0, n)
                 }
             }
         } catch (_: Throwable) {}
-        return out.toString()
+        return try { TextEncoding.decode(out.toByteArray()) } catch (_: Throwable) { "" }
     }
 
     data class Result(val text: String, val truncated: Boolean)

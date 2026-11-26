@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.iptv.app.core.SourceOrigin
+import com.iptv.app.core.TextEncoding
 import com.iptv.app.model.Channel
 import com.iptv.app.model.SourceConfig
 
@@ -46,8 +47,21 @@ object Prefs {
     }
 
     // ---------------- 频道缓存 ----------------
+    /**
+     * v2.0.2：读取时对历史遗留的乱码字段做一次性修复。
+     * 旧版本用 Latin-1 解码订阅样本，导致部分频道名/分组变成「GOé å」这类乱码并已入库。
+     * 在这里按高置信度规则还原，用户升级后无需重新导入即可看到正确中文。
+     */
+    private fun repair(list: List<Channel>): List<Channel> = list.map { ch ->
+        val name = TextEncoding.fixMojibake(ch.name)
+        val group = TextEncoding.fixMojibake(ch.group)
+        val source = TextEncoding.fixMojibake(ch.source)
+        if (name == ch.name && group == ch.group && source == ch.source) ch
+        else ch.copy(name = name, group = group, source = source)
+    }
+
     fun getChannels(c: Context): MutableList<Channel> =
-        SourceOrigin.decorate(ctx(c).getJson("channels", mutableListOf<Channel>())).toMutableList()
+        repair(SourceOrigin.decorate(ctx(c).getJson("channels", mutableListOf<Channel>()))).toMutableList()
 
     fun saveChannels(c: Context, list: List<Channel>) {
         try {
@@ -60,7 +74,7 @@ object Prefs {
     // ---------------- 已删除频道回收站 ----------------
     /** 保存用户主动删除的频道（含完整信息，便于回收站原样恢复） */
     fun getRecycleBin(c: Context): MutableList<Channel> =
-        SourceOrigin.decorate(ctx(c).getJson("recycle_bin", mutableListOf<Channel>())).toMutableList()
+        repair(SourceOrigin.decorate(ctx(c).getJson("recycle_bin", mutableListOf<Channel>()))).toMutableList()
 
     fun saveRecycleBin(c: Context, list: List<Channel>) {
         try {

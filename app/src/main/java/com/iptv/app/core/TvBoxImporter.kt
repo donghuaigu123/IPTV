@@ -50,7 +50,9 @@ class TvBoxImporter(private val context: Context) {
         label: String,
         onProgress: (CollectProgress) -> Unit
     ): ImportResult = withContext(Dispatchers.IO) {
-        val lives = try { TvBoxParser.parseLives(text) } catch (_: Throwable) { emptyList() }
+        // v2.0.2：粘贴内容也可能带历史乱码，先做兜底修复
+        val fixed = TextEncoding.fixMojibake(text)
+        val lives = try { TvBoxParser.parseLives(fixed) } catch (_: Throwable) { emptyList() }
         if (lives.isEmpty()) {
             return@withContext ImportResult(emptyList(), 0, 0, 0, emptyList())
         }

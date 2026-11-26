@@ -2,6 +2,7 @@ package com.iptv.app.core
 
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import com.iptv.app.core.TextEncoding.fixMojibake
 import com.iptv.app.data.SourceCatalog
 import com.iptv.app.model.Channel
 
@@ -18,7 +19,9 @@ object Parsers {
 
     /** 解析 M3U / M3U8 文本 */
     fun parseM3u(text: String, source: String = ""): List<Channel> {
-        val lines = text.lineSequence().map { it.trim() }.toList()
+        // v2.0.2：兜底修复历史/粘贴来源中的乱码（UTF-8 被 Latin-1 误解码）
+        val fixed = fixMojibake(text)
+        val lines = fixed.lineSequence().map { it.trim() }.toList()
         val result = mutableListOf<Channel>()
         var pendingName = ""
         var pendingGroup = ""
@@ -73,7 +76,7 @@ object Parsers {
     /** 解析 TXT：支持 "频道名,URL"、"频道名#genre,URL" 及纯 URL 行 */
     fun parseTxt(text: String, source: String = ""): List<Channel> {
         val result = mutableListOf<Channel>()
-        text.lineSequence()
+        fixMojibake(text).lineSequence()
             .map { it.trim() }
             .filter { it.isNotBlank() && !it.startsWith("#") }
             .forEach { line ->
@@ -110,11 +113,12 @@ object Parsers {
 
     /** 自动识别格式 */
     fun parseAny(text: String, source: String = ""): List<Channel> {
-        val head = text.take(400)
+        val fixed = fixMojibake(text)
+        val head = fixed.take(400)
         return when {
-            head.contains("#EXTM3U", ignoreCase = true) -> parseM3u(text, source)
-            head.trimStart().startsWith("{") || head.trimStart().startsWith("[") -> parseJsonPlaylist(text, source)
-            else -> parseTxt(text, source)
+            head.contains("#EXTM3U", ignoreCase = true) -> parseM3u(fixed, source)
+            head.trimStart().startsWith("{") || head.trimStart().startsWith("[") -> parseJsonPlaylist(fixed, source)
+            else -> parseTxt(fixed, source)
         }
     }
 

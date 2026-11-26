@@ -223,9 +223,11 @@ class SourceCollector(private val context: Context) {
     /** 导入用户提供的文本（本地文件或粘贴内容）；TVBox 配置会走二次展开 */
     fun parseImported(text: String, label: String, configUrl: String? = null): List<Channel> {
         return try {
-            if (TvBoxParser.isTvBoxConfig(text)) {
-                expandTvBoxSync(text, configUrl ?: "", label, DEFAULT_UA)
-            } else Parsers.parseAny(text, label)
+            // v2.0.2：粘贴内容也可能带历史乱码，先做兜底修复
+            val fixed = TextEncoding.fixMojibake(text)
+            if (TvBoxParser.isTvBoxConfig(fixed)) {
+                expandTvBoxSync(fixed, configUrl ?: "", label, DEFAULT_UA)
+            } else Parsers.parseAny(fixed, label)
         } catch (_: Throwable) { emptyList() }
     }
 
