@@ -35,8 +35,15 @@ class MainActivity : AppCompatActivity() {
         // 外部以 m3u/m3u8/http(s) 链接唤起：记下待导入地址并切到频道页自动导入
         val incoming: Uri? = intent?.data
         if (incoming != null) {
-            val url = incoming.toString()
-            if (url.contains("://")) {
+            val scheme = incoming.scheme?.lowercase()
+            // 只处理网络类 scheme，避免 content:// / file:// 被误当链接下载
+            if (scheme == "http" || scheme == "https" || scheme == "m3u" || scheme == "m3u8") {
+                // m3u://xxx 这类自定义 scheme 的实际地址在 host+path 中，还原为 http(s) 链接
+                val url = if (scheme == "m3u" || scheme == "m3u8") {
+                    val raw = incoming.toString()
+                    val rest = raw.substringAfter("://")
+                    "https://$rest"
+                } else incoming.toString()
                 PlaylistBus.pendingImportUrl = url
                 switchTo(1)
                 Toast.makeText(this, "已收到直播源链接，正在导入…", Toast.LENGTH_SHORT).show()

@@ -156,7 +156,7 @@ class LibraryFragment : Fragment() {
     private fun buildOriginChips() {
         chipOrigins.removeAllViews()
         val groups = allGroups.groupBy { "${it.originKind}|${it.originKey.ifBlank { it.originKind }}" }
-            .map { (id, list) ->
+            .map { (_, list) ->
                 val first = list.first()
                 SourceOrigin.OriginGroup(
                     kind = first.originKind,

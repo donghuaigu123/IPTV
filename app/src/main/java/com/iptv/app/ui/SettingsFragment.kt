@@ -56,7 +56,7 @@ class SettingsFragment : Fragment() {
         }
         v.findViewById<Button>(R.id.btnSaveSettings).setOnClickListener {
             val timeout = etTimeout.text.toString().toIntOrNull()?.coerceIn(3, 30) ?: 8
-            val concurrency = etConcurrency.text.toString().toIntOrNull()?.coerceIn(4, 64) ?: 24
+            val concurrency = etConcurrency.text.toString().toIntOrNull()?.coerceIn(4, 32) ?: 24
             Prefs.putInt(ctx, Prefs.KEY_TIMEOUT, timeout)
             Prefs.putInt(ctx, Prefs.KEY_CONCURRENCY, concurrency)
             Prefs.putBool(ctx, Prefs.KEY_AUTO_CHECK, swAutoCheck.isChecked)

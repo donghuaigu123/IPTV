@@ -78,13 +78,20 @@ class PlayerActivity : AppCompatActivity() {
 
     /** 当前线路连续失败次数：达到阈值才认定线路无效并切换，避免网络抖动导致的误切 */
     private var lineRetryCount = 0
+
     companion object {
-        /** 判定线路无效前允许的重试次数（含首次共 MAX+1 次尝试） */
-        private const val MAX_LINE_RETRY = 2
-        /** 失败后重试前的冷静等待，避免疯狂重连 */
-        private const val RETRY_DELAY_MS = 1200L
-        /** 单条线路连接超时兜底，给弱网线路充足时间 */
-        private const val CONNECT_TIMEOUT_MS = 15000L
+        /**
+         * v2.0.3 线路切换提速：错误分级 + 参数收紧。
+         * - 确定性失败（HTTP 错误、格式错误、无效地址）：不重试，立即换线——这类线路确实无效。
+         * - 临时性失败（网络抖动/超时）：仅重试 1 次，冷静期很短，兼顾稳定与速度。
+         * 相比旧版「所有错误都重试 2 次 + 1.2 秒冷静 + 15 秒超时」，切换响应显著加快。
+         */
+        private const val MAX_TRANSIENT_RETRY = 1
+        private const val RETRY_DELAY_MS = 450L
+        /** 连接超时兜底：直播流 8 秒连不上基本可判定无效，及时让位下一条线路 */
+        private const val CONNECT_TIMEOUT_MS = 8000L
+        /** HTTP 底层连接/读取超时，与上面的兜底对齐，避免底层卡满 15 秒 */
+        private const val HTTP_TIMEOUT_MS = 8000
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -108,16 +115,27 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    /** 单条线路长时间无响应的兜底：按「失败处理」流程走，先重试确认再决定是否换线 */
+    /** 单条线路 8 秒无响应的兜底：已等待足够久，视为确定性失败直接换线，不再二次等待 */
     private val switchTimeoutTask = Runnable {
         if (switchingGuard && !playerReleased && !isFinishing && !isDestroyed) {
-            onLineFailure("连接超时")
+            onLineFailure("连接超时", fatal = true)
         }
     }
 
     /** 冷静期后重试当前线路（重新 prepare），不切换线路 */
     private val retryTask = Runnable {
         if (!playerReleased && !isFinishing && !isDestroyed) retryCurrentLine()
+    }
+
+    /** 失败提示短暂停留后自动隐藏，避免长期遮挡画面 */
+    private val hideHintTask = Runnable {
+        if (!playerReleased && !isFinishing && !isDestroyed) tvCenterHint.visibility = View.GONE
+    }
+
+    private fun showFailureHint(text: String) {
+        handler.removeCallbacks(hideHintTask)
+        tvCenterHint.apply { this.text = text; visibility = View.VISIBLE }
+        handler.postDelayed(hideHintTask, 4000)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -210,8 +228,8 @@ class PlayerActivity : AppCompatActivity() {
         dataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(ua)
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15000)
-            .setReadTimeoutMs(15000)
+            .setConnectTimeoutMs(HTTP_TIMEOUT_MS)
+            .setReadTimeoutMs(HTTP_TIMEOUT_MS)
 
         trackSelector = DefaultTrackSelector(ctx)
 
@@ -256,6 +274,7 @@ class PlayerActivity : AppCompatActivity() {
                                     lineRetryCount = 0
                                     handler.removeCallbacks(switchTimeoutTask)
                                     handler.removeCallbacks(retryTask)
+                                    handler.removeCallbacks(hideHintTask)
                                     tvCenterHint.visibility = View.GONE
                                     updateTime()
                                 }
@@ -276,16 +295,16 @@ class PlayerActivity : AppCompatActivity() {
                     }
                     override fun onPlayerError(error: PlaybackException) {
                         if (playerReleased || isFinishing || isDestroyed) return
-                        // 线路播放失败：不立即换线，先重试确认线路确实无效（避免网络抖动误切）
-                        val reason = when (error.errorCode) {
-                            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "网络连接失败"
-                            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "连接超时"
-                            PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "HTTP 错误"
+                        // v2.0.3：错误分级——确定性失败立即换线，仅网络抖动才快速重试 1 次
+                        val (reason, fatal) = when (error.errorCode) {
+                            PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "HTTP 错误" to true
                             PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-                            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "格式错误"
-                            else -> "播放失败"
+                            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "格式错误" to true
+                            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "网络连接失败" to false
+                            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "连接超时" to false
+                            else -> "播放失败" to false
                         }
-                        onLineFailure(reason)
+                        onLineFailure(reason, fatal)
                     }
                     override fun onVideoSizeChanged(size: VideoSize) {
                         // Media3 自动处理画面比例
@@ -315,10 +334,9 @@ class PlayerActivity : AppCompatActivity() {
 
         val url = ch.url.trim()
         if (!url.contains("://")) {
-            // 地址本身无效（无协议），无需重试，直接认定失败并换线
+            // 地址本身无效（无协议），确定性失败，立即换线不重试
             tvCenterHint.apply { text = "线路 ${currentLineIndex + 1} 地址无效"; visibility = View.VISIBLE }
-            lineRetryCount = MAX_LINE_RETRY
-            onLineFailure("地址无效")
+            onLineFailure("地址无效", fatal = true)
             return
         }
         try {
@@ -340,32 +358,39 @@ class PlayerActivity : AppCompatActivity() {
             handler.postDelayed(switchTimeoutTask, CONNECT_TIMEOUT_MS)
         } catch (e: Exception) {
             tvCenterHint.apply { text = "线路 ${currentLineIndex + 1} 解析失败：${e.message?.take(40)}"; visibility = View.VISIBLE }
-            onLineFailure("解析失败")
+            onLineFailure("解析失败", fatal = true)
         }
     }
 
     /**
-     * 线路失败统一处理：先重试当前线路若干次，确认确实无效后才切换到下一条。
-     * - 每条线路最多尝试 MAX_LINE_RETRY+1 次（首次 + 重试），期间失败计数累加。
+     * 线路失败统一处理（v2.0.3 提速版）：
+     * - [fatal]=true：确定性失败（HTTP 错误/格式错误/无效地址），线路确实无效，立即换线不重试。
+     * - [fatal]=false：临时性失败（网络抖动/超时），快速重试 1 次后换线。
      * - 一旦线路成功播放（STATE_READY），计数被重置。
      */
-    private fun onLineFailure(reason: String) {
+    private fun onLineFailure(reason: String, fatal: Boolean = false) {
         if (playerReleased || isFinishing || isDestroyed) return
         if (groups.getOrNull(currentGroupIndex) == null) return
         handler.removeCallbacks(switchTimeoutTask)
         handler.removeCallbacks(retryTask)
 
-        if (lineRetryCount < MAX_LINE_RETRY) {
+        // 确定性失败：不浪费时间重试，直接切下一条
+        if (fatal) {
+            autoSwitchLine(reason)
+            return
+        }
+
+        if (lineRetryCount < MAX_TRANSIENT_RETRY) {
             lineRetryCount++
             tvCenterHint.apply {
-                text = "线路 ${currentLineIndex + 1} $reason，重试 ${lineRetryCount}/$MAX_LINE_RETRY…"
+                text = "线路 ${currentLineIndex + 1} $reason，快速重试…"
                 visibility = View.VISIBLE
             }
-            // 冷静期后重新 prepare 当前线路；弱网抖动常可自愈
+            // 短冷静期后重新 prepare 当前线路；弱网抖动常可自愈
             handler.postDelayed(retryTask, RETRY_DELAY_MS)
         } else {
-            // 多次重试仍失败，认定线路确实无效，切换到下一条
-            autoSwitchLine()
+            // 重试仍失败，认定线路确实无效，切换到下一条
+            autoSwitchLine(reason)
         }
     }
 
@@ -380,23 +405,24 @@ class PlayerActivity : AppCompatActivity() {
      * 当前线路失败后自动切换到本频道下一条未尝试过的线路。
      * 每条线路在本频道内只尝试一次；全部失败后给出提示并停止，避免无限重试。
      */
-    private fun autoSwitchLine() {
+    private fun autoSwitchLine(reason: String = "播放失败") {
         if (playerReleased || isFinishing || isDestroyed) return
         val g = groups.getOrNull(currentGroupIndex) ?: return
         if (g.channels.size <= 1) {
-            tvCenterHint.apply { text = "播放失败，该频道暂无其他线路"; visibility = View.VISIBLE }
+            showFailureHint("$reason，该频道暂无其他线路")
             return
         }
         val next = g.channels.indices.firstOrNull { it !in triedLines }
         if (next == null) {
-            tvCenterHint.apply { text = "「${g.name}」全部 ${g.lineCount} 条线路均无法播放"; visibility = View.VISIBLE }
+            showFailureHint("「${g.name}」全部 ${g.lineCount} 条线路均无法播放")
             return
         }
         val failedLine = currentLineIndex
         currentLineIndex = next
         lineRetryCount = 0 // 新线路重新计数，给足重试机会
         handler.removeCallbacks(retryTask)
-        tvCenterHint.apply { text = "线路 ${failedLine + 1} 多次失败，切换线路 ${next + 1} / ${g.lineCount}"; visibility = View.VISIBLE }
+        handler.removeCallbacks(switchTimeoutTask)
+        tvCenterHint.apply { text = "线路 ${failedLine + 1} $reason，切换线路 ${next + 1} / ${g.lineCount}"; visibility = View.VISIBLE }
         try { if (::player.isInitialized) player.stop() } catch (_: Exception) {}
         playCurrentLine()
     }
@@ -774,6 +800,7 @@ class PlayerActivity : AppCompatActivity() {
         handler.removeCallbacks(updateTask)
         handler.removeCallbacks(switchTimeoutTask)
         handler.removeCallbacks(retryTask)
+        handler.removeCallbacks(hideHintTask)
         try {
             if (::player.isInitialized) {
                 playerView.player = null
